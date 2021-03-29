@@ -1,0 +1,143 @@
+#!/bin/bash
+#wgetseed $profondeurDossier $critere1 $critere2 $dossier
+#TODO pb de parsing avec &#32; IFS et eval ??
+#server adress here
+#site="ftp://dns.adress.org//data"
+site="ftp://cluster1m.seedbox.fr//data/complete/"
+triHTML="sed 's/%20/ /g' | sed 's/%C3%A9/é/g' | sed 's/%C3%B4/ô/g' | sed 's/%5B/[/g' | sed 's/%26/\&/g' | sed 's/%5D/]/g' | sed 's/(/\\(/g' | sed 's/)/\\)/g'"
+triHTMLInverse="sed 's/\&\#32 /%20/g' | sed 's/ /%20/g' | sed 's/\&\#32\;/%20/g'"
+chemin="/tmp"
+resultatsSeed="$chemin/resultatsSeed"
+listeFilms="$chemin/listeFilms.html"
+nomsNoHtml="$chemin/nomsNoHtml"
+resultatsSeedComplet="$chemin/resultatsSeedComplet"
+resultatsSeedDossier="$chemin/resultatsSeedDossier"
+typeConnexion="--secure-protocol=TLSv1_3"
+
+effacer()
+{   rm $resultatsSeed > /dev/null 2>&1
+    rm $listeFilms > /dev/null 2>&1
+    rm $nomsNoHtml > /dev/null 2>&1
+    rm $resultatsSeedComplet > /dev/null 2>&1
+}
+
+test (){
+    echo "resultatsSeed = "`cat $resultatsSeed`
+    # echo "listeFilms = "`cat $listeFilms`
+    echo "nomNoHtml = "$nomNoHtml
+    # echo "resultatsSeedComplet ="`cat $resultatsSeedComplet`
+}
+
+#TODO quand on fait tout télécharger, ça ne passe pas
+telecharger(){
+    #param1 dossier #param2 nom
+    nomSysteme=$(echo "$2" | eval $triHTML)
+    telechargement=true
+    IFS=$(echo -en "\n\b")
+    for liste in `ls -t`; do
+        if [ "$liste" == "$nomSysteme" ]; then
+            read -p "Le fichier $nomSysteme existe déjà, voulez-vous l'écraser ? : " -n 1 -r
+            echo ""
+            if [[ $REPLY =~ ^[YyOo]$ ]]; then
+                rm "$nomSysteme"
+                telechargement=true
+            else
+                telechargement=false
+            fi
+            break
+        fi
+    done
+    if [ "$telechargement" = true ]; then
+        wget $site$1$2 $typeConnexion
+    fi    
+    IFS=$SAVEIFS
+}
+
+
+wgetseed()
+{   iteration=$1
+    critere1=$2
+    critere2=$3
+    dossier=$5
+
+    rm $listeFilms > /dev/null 2>&1
+    wget -O - $site$dossier $typeConnexion --quiet > $listeFilms
+    cat $listeFilms | eval $triHTMLInverse > $resultatsSeedComplet
+    cat $resultatsSeedComplet > $listeFilms
+    rm $resultatsSeedComplet > /dev/null 2>&1
+    
+    if [ "$critere1" == "" ]; then
+        cat $listeFilms | grep "Fichier\|Répertoire" > $resultatsSeedComplet
+    else
+        cat $listeFilms | grep -i -E "$critere1.*$critere2" | grep "Fichier\|Répertoire" > $resultatsSeedComplet
+    fi
+
+    colonne=$((6+$iteration))
+    cat $resultatsSeedComplet | cut -d "/" -f $colonne | cut -d "\"" -f 1 > $resultatsSeed
+    nbLignes=$(cat $resultatsSeed | wc -l)
+    
+    if [ $nbLignes -eq 1 ]; then
+        nom=$(cat $resultatsSeed)
+        nomNoHtml=$(echo "$nom" | eval $triHTML)
+        rm $resultatsSeed > /dev/null 2>&1
+        rm $listeFilms > /dev/null 2>&1
+        if grep -q Répertoire $resultatsSeedComplet
+        then
+            if [ "$dossier" == "" ]; then
+                dossier="$nom/"
+            else
+                dossier="$dossier$nom/"
+            fi
+            iteration=$(($1+1))
+            rm $resultatsSeedComplet > /dev/null 2>&1
+            if [ ! -z "$critere2" ]; then
+                critere1=$critere2
+            fi
+            wgetseed $iteration $critere1 "" n $dossier
+        else
+            rm $resultatsSeedComplet
+            if [ "$4" == "ok" ]; then
+                telecharger $dossier $nom
+            else 
+                read -p "Voulez-vous télécharger \"$nomNoHtml\" : " -n 1 -r
+                echo ""
+                if [[ $REPLY =~ ^[YyOo]$ ]]
+                then
+                telecharger $dossier $nom
+                fi
+            fi
+        fi
+    elif [ $nbLignes -gt 1 ]; then #TODO quand plusieurs choix parfois on ne peut pas télécharger les deux en mm temps
+        while read ligne
+        do
+          echo "$ligne" | eval $triHTML >> $nomsNoHtml
+        done < $resultatsSeed
+        cat $nomsNoHtml
+        echo ""
+        read -p "Voulez-vous tout télécharger ? : " -n 1 -r
+        echo ""
+        cat $resultatsSeed > $resultatsSeedDossier
+        if [[ $REPLY =~ ^[YyOo]$ ]]; then
+            while read crit2; do
+                wgetseed $iteration $critere1 $crit2 ok $dossier
+            done < $resultatsSeedDossier
+        else
+            ##TODO pouvoir choisir plusieurs fichiers à la suite
+            read -p "Saisissez le 2eme critère parmi la liste : "
+            rm $resultatsSeed > /dev/null 2>&1
+            rm $nomsNoHtml > /dev/null 2>&1
+            IFS=$(echo -en "\b\n~")
+            for crit2 in $REPLY; do
+                crit2=$(echo "$crit2" | eval $triHTMLInverse)
+                wgetseed $iteration $critere1 $crit2 ok $dossier
+            done
+            IFS=$SAVEIFS
+        fi
+    else
+        echo  "Pas de résultat pour "$'\e[1;31m'"\"$critere1 $crit2\""$'\e[0m'
+    fi
+}
+SAVEIFS=$IFS
+effacer
+wgetseed 0 $1 $2 n
+effacer
