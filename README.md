@@ -1,0 +1,2 @@
+# wgetseed
+bash script seedbox
