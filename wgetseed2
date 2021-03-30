@@ -25,9 +25,9 @@ test (){
     # echo "resultatsSeedComplet ="`cat $resultatsSeedComplet`
 }
 
-#TODO quand on fait tout télécharger, ça ne passe pas
+#TODO creer l'arborescence
 telecharger(){
-    #param1 dossier #param2 nom
+    #$1 dossier #$2 nom
     nomSysteme=$(echo "$2" | eval $triHTML)
     telechargement=true
     IFS=$(echo -en "\n\b")
@@ -70,62 +70,42 @@ wgetseed()
     
     echo ""; echo "fichier = $fichier";
     echo "dossier = $dossier"; echo "";
-    
-    # rm "$listeFilms$fichier" > /dev/null 2>&1
+    # Requete
     wget -O - $site$dossier $typeConnexion --quiet > "$listeFilms$fichier"
     cat "$listeFilms$fichier" | eval $triHTMLInverse > "$resultatsSeedComplet$fichier"
     cat "$resultatsSeedComplet$fichier" > "$listeFilms$fichier"
-    # rm "$resultatsSeedComplet$fichier" > /dev/null 2>&1
-    
+    # Récupérer les lignes qui concernent les dossiers et fichiers
     if [ "$critere1" == "" ]; then
         cat "$listeFilms$fichier" | grep "Fichier\|Répertoire" > "$resultatsSeedComplet$fichier"
     else
         cat "$listeFilms$fichier" | grep -i -E "$critere1.*$critere2" | grep "Fichier\|Répertoire" > "$resultatsSeedComplet$fichier"
     fi
-
+    # Récupérer les noms de dossiers ou fichiers
     cat "$resultatsSeedComplet$fichier" | cut -d "/" -f $colonne | cut -d "\"" -f 1 > "$resultatsSeed$fichier"
     cat "$resultatsSeed$fichier"
+    # Parsing % characters
+    cat "$resultatsSeed$fichier" | eval $triHTML > "$nomsNoHtml$fichier"
     nbLignes=$(cat "$resultatsSeed$fichier" | wc -l)
     
-    if [ $nbLignes -eq 1 ]; then
+    if [[ $nbLignes == 1 && $(cat $listeFilms$fichier | grep -q "Fichier") ]]; then
         nom=$(cat "$resultatsSeed$fichier")
         nomNoHtml=$(echo "$nom" | eval $triHTML)
-        # rm "$resultatsSeed$fichier" > /dev/null 2>&1
-        # rm "$listeFilms$fichier" > /dev/null 2>&1
-        if grep -q Répertoire "$resultatsSeedComplet$fichier"
-        then
-            if [ "$dossier" == "" ]; then
-                dossier="$nom/"
-            else
-                dossier="$dossier$nom/"
-            fi
-            iteration=$(($1+1))
-            critere1=$critere2
-            critere2="."
-            wgetseed $iteration $critere1 $critere2 $dlAuto $dossier
-        else
-            if [ $dlAuto ]; then
+        if $dlAuto; then
+            telecharger $dossier $nom
+        else 
+            read -p "Voulez-vous télécharger \"$nomNoHtml\" : " -n 1 -r
+            echo ""
+            if [[ $REPLY =~ ^[YyOo]$ ]]; then
                 telecharger $dossier $nom
-            else 
-                read -p "Voulez-vous télécharger \"$nomNoHtml\" : " -n 1 -r
-                echo ""
-                if [[ $REPLY =~ ^[YyOo]$ ]]
-                then
-                telecharger $dossier $nom
-                fi
             fi
         fi
-    elif [ $nbLignes -gt 1 ]; then #TODO quand plusieurs choix parfois on ne peut pas télécharger les deux en mm temps
-        while read ligne
-        do
-          echo "$ligne" | eval $triHTML >> "$nomsNoHtml$fichier"
-        done < "$resultatsSeed$fichier"
-        echo "resultatsSeed :"; cat "$resultatsSeedComplet$fichier"
-
-        if [ $dlAuto ]; then # a bouger en fin de boucle
+    elif [ $nbLignes -eq 0 ]; then
+        echo  "Pas de résultat pour "$'\e[1;31m'"\"$critere1 $critere2\""$'\e[0m'
+    else
+        if $dlAuto; then
             while read ligne; do
-                nom=$(echo "$ligne" | eval | cut -d "/" -f $colonne | cut -d "\"" -f 1)
-                if grep -q Répertoire; then
+                nom=$(echo "$ligne" | cut -d "/" -f $colonne | cut -d "/" -f 1)
+                if [ $(echo "$ligne" | grep "Répertoire") ]; then
                     critere1="."
                     critere2="."
                     echo "resultat parse nom = $nom"
@@ -134,50 +114,29 @@ wgetseed()
                     else
                         dossier="$dossier$nom/"
                     fi
-                    wgetseed $((1+$iteration)) $critere1 $critere2 $dlAuto $dossier
-                else
-                    telecharger $dossier $nom
                 fi
+                wgetseed $((1+$iteration)) $critere1 $critere2 $dlAuto $dossier
             done < "$resultatsSeedComplet$fichier"
         else
+            cat "$nomsNoHtml$fichier"
             echo ""
             read -p "Voulez-vous tout télécharger ? : " -n 1 -r
-            echo ""
-            cat "$resultatsSeed$fichier" > "$resultatsSeedDossier$fichier"
             if [[ $REPLY =~ ^[YyOo]$ ]]; then
-                nom=$(echo "$ligne" | eval | cut -d "/" -f $colonne | cut -d "\"" -f 1)
-                while read ligne; do
-                    if grep -q Répertoire; then
-                        critere1="."
-                        critere2="."
-                        if [ "$dossier" == "" ]; then
-                            dossier="$nom/"
-                        else
-                            dossier="$dossier$nom/"
-                        fi
-                        wgetseed $((1+$iteration)) $critere1 $critere2 $true $dossier
-                    else
-                        telecharger $dossier $nom
-                    fi
-                done < "$resultatsSeedComplet$fichier"
+                wgetseed $iteration $critere1 $critere2 true $dossier
             else
-                ##TODO pouvoir choisir plusieurs fichiers à la suite
-                read -p "Saisissez le 2eme critère parmi la liste : "
-                IFS=$(echo -en "\b\n~")
+                echo ""; read -p "Saisissez le 2eme critère parmi la liste : "
                 for crit2 in $REPLY; do
                     crit2=$(echo "$crit2" | eval $triHTMLInverse)
                     wgetseed $iteration $critere1 $crit2 $dlAuto $dossier
-                done
+                done 
             fi
         fi
-    else
-        echo  "Pas de résultat pour "$'\e[1;31m'"\"$critere1 $critere2\""$'\e[0m'
     fi
 }
 SAVEIFS=$IFS
 IFS=$(echo -en "\b\n~")
 effacer
 mkdir $chemin
-wgetseed 1 $1 "." $false
+wgetseed 1 $1 "." false
 effacer
 IFS=$SAVEIFS
