@@ -6,23 +6,25 @@
 site="ftp://cluster1m.seedbox.fr//data/complete/"
 triHTML="sed 's/%20/ /g' | sed 's/%C3%A9/é/g' | sed 's/%C3%B4/ô/g' | sed 's/%5B/[/g' | sed 's/%26/\&/g' | sed 's/%5D/]/g' | sed 's/(/\\(/g' | sed 's/)/\\)/g'"
 triHTMLInverse="sed 's/\&\#32 /%20/g' | sed 's/ /%20/g' | sed 's/\&\#32\;/%20/g'"
-chemin="/tmp"
+chemin="/tmp/.wgetseed"
 resultatsSeed="$chemin/resultatsSeed"
-listeFilms="$chemin/listeFilms.html"
+listeFilms="$chemin/listeFilms"
 nomsNoHtml="$chemin/nomsNoHtml"
 resultatsSeedComplet="$chemin/resultatsSeedComplet"
 resultatsSeedDossier="$chemin/resultatsSeedDossier"
 typeConnexion="--secure-protocol=TLSv1_3"
 
 effacer()
-{   rm $resultatsSeed > /dev/null 2>&1
-    rm $listeFilms > /dev/null 2>&1
-    rm $nomsNoHtml > /dev/null 2>&1
-    rm $resultatsSeedComplet > /dev/null 2>&1
+ {   
+    #  rm $resultatsSeed > /dev/null 2>&1
+#     rm $listeFilms > /dev/null 2>&1
+#     rm $nomsNoHtml > /dev/null 2>&1
+#     rm $resultatsSeedComplet > /dev/null 2>&1
+    rm -r "$chemin" > /dev/null 2>&1
 }
 
 test (){
-    echo "resultatsSeed = "`cat $resultatsSeed`
+    echo "resultatsSeed = "`cat "$resultatsSeed$fichier"`
     # echo "listeFilms = "`cat $listeFilms`
     echo "nomNoHtml = "$nomNoHtml
     # echo "resultatsSeedComplet ="`cat $resultatsSeedComplet`
@@ -49,7 +51,7 @@ telecharger(){
     done
     if [ "$telechargement" = true ]; then
         wget $site$1$2 $typeConnexion
-    fi    
+    fi
     IFS=$SAVEIFS
 }
 
@@ -60,28 +62,39 @@ wgetseed()
     critere2=$3
     dossier=$5
 
-    rm $listeFilms > /dev/null 2>&1
-    wget -O - $site$dossier $typeConnexion --quiet > $listeFilms
-    cat $listeFilms | eval $triHTMLInverse > $resultatsSeedComplet
-    cat $resultatsSeedComplet > $listeFilms
-    rm $resultatsSeedComplet > /dev/null 2>&1
+    if [ ! $critere2 == "." -a $iteration -ne 0 ]; then
+        dossier+=$critere2
+    else
+        critere2=""
+    fi
+    fichier=$( echo $dossier | cut -d "/" -f $(($iteration-1)) )
+    # fichier=$3
+    #sed 's/\///g' )
+    echo ""; echo "fichier = $fichier";echo "";
+    echo "dossier = $dossier"; echo "";
+    
+    # rm "$listeFilms$fichier" > /dev/null 2>&1
+    wget -O - $site$dossier $typeConnexion --quiet > "$listeFilms$fichier"
+    cat "$listeFilms$fichier" | eval $triHTMLInverse > "$resultatsSeedComplet$fichier"
+    cat "$resultatsSeedComplet$fichier" > "$listeFilms$fichier"
+    # rm "$resultatsSeedComplet$fichier" > /dev/null 2>&1
     
     if [ "$critere1" == "" ]; then
-        cat $listeFilms | grep "Fichier\|Répertoire" > $resultatsSeedComplet
+        cat "$listeFilms$fichier" | grep "Fichier\|Répertoire" > "$resultatsSeedComplet$fichier"
     else
-        cat $listeFilms | grep -i -E "$critere1.*$critere2" | grep "Fichier\|Répertoire" > $resultatsSeedComplet
+        cat "$listeFilms$fichier" | grep -i -E "$critere1.*$critere2" | grep "Fichier\|Répertoire" > "$resultatsSeedComplet$fichier"
     fi
 
-    colonne=$((6+$iteration))
-    cat $resultatsSeedComplet | cut -d "/" -f $colonne | cut -d "\"" -f 1 > $resultatsSeed
-    nbLignes=$(cat $resultatsSeed | wc -l)
+    colonne=$((5+$iteration))
+    cat "$resultatsSeedComplet$fichier" | cut -d "/" -f $colonne | cut -d "\"" -f 1 > "$resultatsSeed$fichier"
+    nbLignes=$(cat "$resultatsSeed$fichier" | wc -l)
     
     if [ $nbLignes -eq 1 ]; then
-        nom=$(cat $resultatsSeed)
+        nom=$(cat "$resultatsSeed$fichier")
         nomNoHtml=$(echo "$nom" | eval $triHTML)
-        rm $resultatsSeed > /dev/null 2>&1
-        rm $listeFilms > /dev/null 2>&1
-        if grep -q Répertoire $resultatsSeedComplet
+        # rm "$resultatsSeed$fichier" > /dev/null 2>&1
+        # rm "$listeFilms$fichier" > /dev/null 2>&1
+        if grep -q Répertoire "$resultatsSeedComplet$fichier"
         then
             if [ "$dossier" == "" ]; then
                 dossier="$nom/"
@@ -89,13 +102,13 @@ wgetseed()
                 dossier="$dossier$nom/"
             fi
             iteration=$(($1+1))
-            rm $resultatsSeedComplet > /dev/null 2>&1
-            if [ ! -z "$critere2" ]; then
+            # rm "$resultatsSeedComplet$fichier" > /dev/null 2>&1
+            if [ ! "$critere2" == "." ]; then
                 critere1=$critere2
             fi
-            wgetseed $iteration $critere1 "" n $dossier
+            wgetseed $iteration $critere1 "." n $dossier
         else
-            rm $resultatsSeedComplet
+            # rm "$resultatsSeedComplet$fichier"
             if [ "$4" == "ok" ]; then
                 telecharger $dossier $nom
             else 
@@ -110,22 +123,22 @@ wgetseed()
     elif [ $nbLignes -gt 1 ]; then #TODO quand plusieurs choix parfois on ne peut pas télécharger les deux en mm temps
         while read ligne
         do
-          echo "$ligne" | eval $triHTML >> $nomsNoHtml
-        done < $resultatsSeed
-        cat $nomsNoHtml
+          echo "$ligne" | eval $triHTML >> "$nomsNoHtml$fichier"
+        done < "$resultatsSeed$fichier"
+        cat "$nomsNoHtml$fichier"
         echo ""
         read -p "Voulez-vous tout télécharger ? : " -n 1 -r
         echo ""
-        cat $resultatsSeed > $resultatsSeedDossier
+        cat "$resultatsSeed$fichier" > "$resultatsSeedDossier$fichier"
         if [[ $REPLY =~ ^[YyOo]$ ]]; then
             while read crit2; do
-                wgetseed $iteration $critere1 $crit2 ok $dossier
-            done < $resultatsSeedDossier
+                wgetseed $iteration $crit2 "." ok $dossier
+            done < "$resultatsSeedDossier$fichier"
         else
             ##TODO pouvoir choisir plusieurs fichiers à la suite
             read -p "Saisissez le 2eme critère parmi la liste : "
-            rm $resultatsSeed > /dev/null 2>&1
-            rm $nomsNoHtml > /dev/null 2>&1
+            # rm "$resultatsSeed$fichier" > /dev/null 2>&1
+            # rm "$nomsNoHtml$fichier" > /dev/null 2>&1
             IFS=$(echo -en "\b\n~")
             for crit2 in $REPLY; do
                 crit2=$(echo "$crit2" | eval $triHTMLInverse)
@@ -138,6 +151,8 @@ wgetseed()
     fi
 }
 SAVEIFS=$IFS
+IFS=$(echo -en "\b\n~")
 effacer
-wgetseed 0 $1 $2 n
+mkdir $chemin
+wgetseed 1 $1 "." n
 effacer
