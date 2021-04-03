@@ -4,7 +4,7 @@
 #server adress here
 #site="ftp://dns.adress.org//data"
 site="ftp://cluster1m.seedbox.fr//data/complete/"
-triHTML="sed 's/%20/ /g' | sed 's/%C3%A9/é/g' | sed 's/%C3%B4/ô/g' | sed 's/%5B/[/g' | sed 's/%26/\&/g' | sed 's/%5D/]/g' | sed 's/(/\\(/g' | sed 's/)/\\)/g'"
+triHTML="sed 's/%20/ /g' | sed 's/%C3%A9/é/g' | sed 's/%C3%B4/ô/g' | sed 's/%5B/[/g' | sed 's/%26/\&/g' | sed 's/%5D/]/g' | sed 's/(/\\(/g' | sed 's/)/\\)/g' | sed 's/%C3%A0/à/g' | sed 's/%C3%A8/è/g' | sed 's/%E2%80%99/ /g' | sed 's/%C3%AA/ê/g' | sed 's/%2C/,/g' | sed 's/%C3%B5/õ/g' | sed 's/%C3%A7/ç/g' | sed 's/%2B/+/g' | sed 's/%C3%BB/û/g' | sed 's/%40/@/g'" 
 triHTMLInverse="sed 's/\&\#32 /%20/g' | sed 's/ /%20/g' | sed 's/\&\#32\;/%20/g'"
 chemin="/tmp/.wgetseed"
 resultatsSeed="$chemin/resultatsSeed"
@@ -30,22 +30,20 @@ telecharger(){
     #$1 dossier #$2 nom 
     nomSysteme=$(echo "$2" | eval $triHTML)
     telechargement=true
-    # Verification si le fichier existe déjà
-    if [ $ecraser == false ]; then
-        for liste in $(ls); do
-            if [ "$liste" == "$nomSysteme" ]; then
+    # Verification si le fichier existe déjà    
+    for liste in $(ls); do
+        if [ "$liste" == "$nomSysteme" ]; then
+            if [ ! $ecraser ]; then
                 read -u 2 -p "Le fichier $nomSysteme existe déjà, voulez-vous l'écraser ? : " reponse
-                echo "";echo "reply = $reponse"
-                if [[ $reponse =~ ^[YyOo]$ ]]; then
-                    rm "$nomSysteme"
-                    telechargement=true
-                    break
-                else
-                    telechargement=false
-                fi
             fi
-        done
-    fi
+            if [[ $ecraser || $reponse =~ ^[YyOo]$ ]]; then
+                rm "$nomSysteme"
+                break
+            else
+                telechargement=false
+            fi
+        fi
+    done
     if [ "$telechargement" = true ]; then
         wget $site$1$2 $typeConnexion
     fi
@@ -53,8 +51,8 @@ telecharger(){
 
 
 wgetseed()
-{   
-    # test $1 $2 $3 $4 $5 $6
+{   echo "";
+    test $1 $2 $3 $4 $5 $6
     iteration=$1
     critere1=$2
     critere2=$3
@@ -88,7 +86,7 @@ wgetseed()
     cat "$resultatsSeed$fichier" | eval $triHTML > "$nomsNoHtml$fichier"
     nbLignes=$(cat "$resultatsSeed$fichier" | wc -l)
     # Affichage résultats recherche
-    echo ""; cat "$resultatsSeed$fichier"
+    echo ""; cat "$nomsNoHtml$fichier"
     
     if [[ $nbLignes == 1 ]]; then
         if [ $(cat $resultatsSeedComplet$fichier  | cut -d "/" -f 1 | grep "Fichier") ]; then
@@ -120,8 +118,6 @@ wgetseed()
         echo  "Pas de résultat pour "$'\e[1;31m'"\"$critere1 $critere2\""$'\e[0m'
     else
         if $dlAuto; then
-            echo ""; echo "dans boucle auto yes"
-            cat $resultatsSeedComplet$fichier
             while read ligne; do
                 nom=$(echo "$ligne" | cut -d "/" -f $colonne | cut -d "\"" -f 1)
                 critere1="."
@@ -169,6 +165,10 @@ read -p "Voulez-vous écraser automatiquement le.s fichier.s ? : " -n 1 -r; echo
 if [[ $REPLY =~ ^[YyOo]$ ]]; then
     ecraser=true
 fi
-wgetseed 1 $1 "." false
+recherche=$1
+if [ "$recherche" == "" ]; then
+    recherche="."
+fi
+wgetseed 1 $recherche "." false
 effacer
 IFS=$SAVEIFS
