@@ -13,6 +13,10 @@ nomsNoHtml="$chemin/nomsNoHtml"
 resultatsSeedComplet="$chemin/resultatsSeedComplet"
 resultatsSeedDossier="$chemin/resultatsSeedDossier"
 typeConnexion="--secure-protocol=TLSv1_3"
+ecraser=false
+
+#TODO creer l'arborescence
+#TODO Téléchargement automatique lorsque plusieurs dossiers dans les résultats
 
 effacer(){
     rm -r "$chemin" > /dev/null 2>&1
@@ -22,39 +26,41 @@ test(){
     echo ""; echo ""$'\e[1;36m'"i : $1 | crit1 : $2 | crit2 : $3 | dlAuto : $4 | dossier : $5 "$'\e[0m'""
 }
 
-#TODO creer l'arborescence
 telecharger(){
     #$1 dossier #$2 nom 
-    # nomSysteme=$(echo "$2" | eval $triHTML)
-    # telechargement=true
-    # # Verification si le fichier existe déjà
-    # for liste in `ls -t`; do
-    #     if [ "$liste" == "$nomSysteme" ]; then
-    #         read -p "Le fichier $nomSysteme existe déjà, voulez-vous l'écraser ? : " -n 1 -r
-    #         echo ""
-    #         if [[ $REPLY =~ ^[YyOo]$ ]]; then
-    #             rm "$nomSysteme"
-    #             telechargement=true
-    #             break
-    #         else
-    #             telechargement=false
-    #         fi
-    #     fi
-    # done
-    # if [ "$telechargement" = true ]; then
-    #     wget $site$1$2 $typeConnexion
-    # fi
-    wget $site$1$2 $typeConnexion
+    nomSysteme=$(echo "$2" | eval $triHTML)
+    telechargement=true
+    # Verification si le fichier existe déjà
+    if [ $ecraser == false ]; then
+        for liste in $(ls); do
+            if [ "$liste" == "$nomSysteme" ]; then
+                read -u 2 -p "Le fichier $nomSysteme existe déjà, voulez-vous l'écraser ? : " reponse
+                echo "";echo "reply = $reponse"
+                if [[ $reponse =~ ^[YyOo]$ ]]; then
+                    rm "$nomSysteme"
+                    telechargement=true
+                    break
+                else
+                    telechargement=false
+                fi
+            fi
+        done
+    fi
+    if [ "$telechargement" = true ]; then
+        wget $site$1$2 $typeConnexion
+    fi
 }
 
 
 wgetseed()
-{   test $1 $2 $3 $4 $5
+{   
+    # test $1 $2 $3 $4 $5 $6
     iteration=$1
     critere1=$2
     critere2=$3
     dlAuto=$4
     dossier=$5
+    fichier=$6
     colonne=$((5+$iteration))
 
     if [ "$critere1" == "." -a "$iteration" -ne 0 ]; then
@@ -63,11 +69,9 @@ wgetseed()
     if [ "$critere2" == "." -a "$iteration" -ne 0 ]; then
         critere2=""
     fi
-
-    fichier=$( echo $dossier | cut -d "/" -f $(($iteration-1)) )
     
-    echo ""; echo "fichier = $fichier";
-    echo "dossier = $dossier"; echo "";
+    # echo ""; echo "fichier = $fichier";
+    # echo "dossier = $dossier"; echo "";
     # Requete
     wget -O - $site$dossier $typeConnexion --quiet > "$listeFilms$fichier"
     cat "$listeFilms$fichier" | eval $triHTMLInverse > "$resultatsSeedComplet$fichier"
@@ -80,10 +84,11 @@ wgetseed()
     fi
     # Récupérer les noms de dossiers ou fichiers
     cat "$resultatsSeedComplet$fichier" | cut -d "/" -f $colonne | cut -d "\"" -f 1 > "$resultatsSeed$fichier"
-    echo "resultatseed : "; cat "$resultatsSeed$fichier"
     # Parsing % characters
     cat "$resultatsSeed$fichier" | eval $triHTML > "$nomsNoHtml$fichier"
     nbLignes=$(cat "$resultatsSeed$fichier" | wc -l)
+    # Affichage résultats recherche
+    echo ""; cat "$resultatsSeed$fichier"
     
     if [[ $nbLignes == 1 ]]; then
         if [ $(cat $resultatsSeedComplet$fichier  | cut -d "/" -f 1 | grep "Fichier") ]; then
@@ -103,7 +108,7 @@ wgetseed()
             nomNoHtml=$(echo "$nom" | eval $triHTML)
             critere1="."
             critere2="."
-            echo "resultat parse nom = $nom" # todo
+            # echo "resultat parse nom = $nom" # todo
             if [ "$dossier" == "" ]; then
                 dossier="$nom/"
             else
@@ -121,7 +126,7 @@ wgetseed()
                 nom=$(echo "$ligne" | cut -d "/" -f $colonne | cut -d "\"" -f 1)
                 critere1="."
                 critere2="."
-                echo "resultat parse nom = $nom" # todo
+                # echo "resultat parse nom = $nom" # todo
                 if [ $(echo "$ligne" | grep "Répertoire") ]; then
                     if [ "$dossier" == "" ]; then
                         dossier="$nom/"
@@ -130,7 +135,7 @@ wgetseed()
                     fi
                     wgetseed $((1+$iteration)) $critere1 $critere2 $dlAuto $dossier
                 else
-                wgetseed $iteration $nom $critere2 $dlAuto $dossier
+                wgetseed $iteration $nom $critere2 $dlAuto $dossier $nom
                 fi
             done < "$resultatsSeedComplet$fichier"
         else
@@ -160,6 +165,10 @@ SAVEIFS=$IFS
 IFS=$(echo -en "\b\n~")
 effacer
 mkdir $chemin
+read -p "Voulez-vous écraser automatiquement le.s fichier.s ? : " -n 1 -r; echo ""
+if [[ $REPLY =~ ^[YyOo]$ ]]; then
+    ecraser=true
+fi
 wgetseed 1 $1 "." false
 effacer
 IFS=$SAVEIFS
