@@ -17,6 +17,7 @@ ecraser=false
 
 #TODO creer l'arborescence
 #TODO Téléchargement automatique lorsque plusieurs dossiers dans les résultats
+#TODO PB parfois télécharge en double
 
 effacer(){
     rm -r "$chemin" > /dev/null 2>&1
@@ -66,6 +67,9 @@ wgetseed()
     fi
     if [ "$critere2" == "." -a "$iteration" -ne 0 ]; then
         critere2=""
+    fi
+    if [ $dossier == "." ]; then
+        dossier=""
     fi
     
     # echo ""; echo "fichier = $fichier";
@@ -131,7 +135,7 @@ wgetseed()
                     fi
                     wgetseed $((1+$iteration)) $critere1 $critere2 $dlAuto $dossier
                 else
-                wgetseed $iteration $nom $critere2 $dlAuto $dossier $nom
+                    wgetseed $iteration $nom $critere2 $dlAuto "." $nom
                 fi
             done < "$resultatsSeedComplet$fichier"
         else
