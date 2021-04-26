@@ -36,9 +36,6 @@ telecharger(){
     # TODO verifier que les fichiers font la meme taille
     for liste in $(ls); do
 	if [ "$liste" == "$nomSysteme" ]; then
-            # if [ ! $ecraser ]; then
-            #    read -u 2 -p "Le fichier $nomSysteme existe déjà, voulez-vous l'écraser ? : " reponse
-            # fi
             if [[ "$ecraser" == "true" ]]; then # || $reponse =~ ^[YyOo]$ ]]; then
                 rm "$nomSysteme"
                 break
@@ -55,15 +52,13 @@ telecharger(){
 
 
 wgetseed()
-{   echo "";
-    # test $1 $2 $3 $4 $5 $6
+{   echo ""; # test $1 $2 $3 $4 $5 $6
     local iteration=$1
     local critere1=$2
     local critere2=$3
     local dlAuto=$4
     local dossier=$(echo "$5" | sed 's/\/\/$/\//g')
-    local fichier=$(echo "$5$6" | sed 's/[^a-zA-Z0-9_]//g')
-    echo "fichier = $fichier"
+    local fichier=$(echo "$5$6" | sed 's/[^a-zA-Z0-9_]//g'); # echo "fichier = $fichier"
     local colonne=$((5+$iteration))
 
     if [ "$critere1" == "." -a "$iteration" -ne 0 ]; then
@@ -76,15 +71,16 @@ wgetseed()
         local dossier=""
     fi
     
-    # echo ""; echo "fichier = $fichier";
-    # echo "dossier = $dossier"; echo "";
     # Requete
     wget -O - $site$dossier $typeConnexion --quiet > "$listeFilms$fichier"
     cat "$listeFilms$fichier" | eval $triHTMLInverse > "$resultatsSeedComplet$fichier"
     cat "$resultatsSeedComplet$fichier" > "$listeFilms$fichier"
+    
     # Récupérer les lignes qui concernent les dossiers et fichiers
     if [ "$critere1" == "" ]; then
         cat "$listeFilms$fichier" | grep "Fichier\|Répertoire" > "$resultatsSeedComplet$fichier"
+    elif [ "$critere2" == "" ]; then
+        cat "$listeFilms$fichier" | grep -i "$critere1" | grep "Fichier\|Répertoire" > "$resultatsSeedComplet$fichier"
     else
         cat "$listeFilms$fichier" | grep -i -E "$critere1.*$critere2" | grep "Fichier\|Répertoire" > "$resultatsSeedComplet$fichier"
     fi
