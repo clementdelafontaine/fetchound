@@ -46,21 +46,20 @@ telecharger(){
         fi
     done
     if [ "$telechargement" = true ]; then
-        # wget $site$2$1 $typeConnexion
-        curl $site$2$1
+        wget $site$2$1 $typeConnexion
     fi
 }
 
 
 wgetseed()
-{   test $1 $2 $3 $4 $5 $6
+{   echo ""; # test $1 $2 $3 $4 $5 $6
     local iteration=$1
     local critere1=$2
     local critere2=$3
     local dlAuto=$4
     local dossier=$(echo "$5" | sed 's/\/\/$/\//g')
     local fichier=$(echo "$5$6" | sed 's/[^a-zA-Z0-9_]//g'); # echo "fichier = $fichier"
-    local colonne=$((4+$iteration)) # Passé de $((4+$iteration)) à 5 du passage de mint à debian 11 (version wget ?/pas la meme reponse du serveur)
+    local colonne=$((5+$iteration))
 
     if [ "$critere1" == "." -a "$iteration" -ne 0 ]; then
         local critere1=""
@@ -73,32 +72,28 @@ wgetseed()
     fi
     
     # Requete
-    # wget -O - $site$dossier $typeConnexion --quiet > "$listeFilms$fichier"
-    curl -n $site$dossier > "$listeFilms$fichier"
-    cat "$listeFilms$fichier"
+    wget -O - $site$dossier $typeConnexion --quiet > "$listeFilms$fichier"
+    cat "$listeFilms$fichier" | eval $triHTML > "$resultatsSeedComplet$fichier"
+    cat "$resultatsSeedComplet$fichier" > "$listeFilms$fichier"
     
-    # Récupérer les lignes qui concernent les dossiers et fichiers
+    # Récupérer les lignes qui concernent les dossiers et fichiers /!\ File\|Directory peuvent être en français ou en anglais selon les configs de serveurs
     if [ "$critere1" == "" ]; then
-        cat "$listeFilms$fichier" | grep "^d\|^-" > "$resultatsSeedComplet$fichier"
+        cat "$listeFilms$fichier" | grep "File\|Directory" > "$resultatsSeedComplet$fichier"
     elif [ "$critere2" == "" ]; then
-        cat "$listeFilms$fichier" | grep -i "$critere1" | grep "^d\|^-" > "$resultatsSeedComplet$fichier"
+        cat "$listeFilms$fichier" | grep -i "$critere1" | grep "File\|Directory" > "$resultatsSeedComplet$fichier"
     else
-        cat "$listeFilms$fichier" | grep -i -E "$critere1.*$critere2" | grep "^d\|^-" > "$resultatsSeedComplet$fichier"
+        cat "$listeFilms$fichier" | grep -i -E "$critere1.*$critere2" | grep "File\|Directory" > "$resultatsSeedComplet$fichier"
     fi
-
-    cat "$resultatsSeedComplet$fichier"
-
     # Récupérer les noms de dossiers ou fichiers
-    cat "$listeFilms$fichier" | cut -d " " -f 9 > "$resultatsSeed$fichier"
-    cat "$resultatsSeed$fichier"
+    cat "$resultatsSeedComplet$fichier" | cut -d "/" -f $colonne | cut -d "\"" -f 1 > "$resultatsSeed$fichier"
     # Parsing % characters
     cat "$resultatsSeed$fichier" | eval $triHTML > "$nomsNoHtml$fichier"
     local nbLignes=$(cat "$resultatsSeed$fichier" | wc -l)
     # Affichage résultats recherche
-    echo "";cat "$nomsNoHtml$fichier"
+    echo ""; cat "$nomsNoHtml$fichier"
     
     if [[ $nbLignes == 1 ]]; then
-        if [ $(cat $resultatsSeedComplet$fichier  | cut -d "/" -f 1 | grep "Fichier") ]; then
+        if [ $(cat $resultatsSeedComplet$fichier  | cut -d "/" -f 1 | grep "File") ]; then
             local nom=$(cat "$resultatsSeed$fichier")
             local nomNoHtml=$(echo "$nom" | eval $triHTML)
             if $dlAuto; then
@@ -110,7 +105,7 @@ wgetseed()
                     telecharger $nom $dossier
                 fi
             fi
-        elif [ $(cat $resultatsSeedComplet$fichier | cut -d "/" -f 1 | grep "Répertoire") ]; then
+        elif [ $(cat $resultatsSeedComplet$fichier | cut -d "/" -f 1 | grep "Directory") ]; then
             local nom=$(cat $resultatsSeedComplet$fichier | cut -d "/" -f $colonne | cut -d "\"" -f 1)
             local nomNoHtml=$(echo "$nom" | eval $triHTML)
             local critere1="."
@@ -132,7 +127,7 @@ wgetseed()
                     local critere1="."
                     local critere2="."
                     # echo "resultat parse nom = $nom" # todo
-                    if [ $(echo "$ligne" | grep "Répertoire") ]; then
+                    if [ $(echo "$ligne" | grep "Directory") ]; then
                         wgetseed $((1+$iteration)) $critere1 $critere2 $dlAuto "$dossier$nom/" $nom
                     else
                         if [ "$dossier" == "" ]; then
