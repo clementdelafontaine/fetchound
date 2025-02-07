@@ -1,0 +1,316 @@
+#!/bin/bash
+
+# Nom du bookmark pour lftp
+DEBUG_MODE=0  # Mettre à 1 pour activer le mode débogage (ne pas supprimer les fichiers temporaires)
+BOOKMARK="seedbox"
+REMOTE_PATH="/data/complete/"
+LOCAL_PATH=$(echo "$PWD" | sed "s/'/\\'/g" | sed 's/ /\\ /g')
+RESULT_FILE="/tmp/search_sdbx_result"
+SEARCH_TERMS=() # Tableau pour stocker les termes de recherche cumulés
+
+# Vérifier si l'option -m ou --missing est passée
+CHECK_MISSING=0
+
+for arg in "$@"; do
+    case "$arg" in
+        -m|--missing)
+            CHECK_MISSING=1
+            ;;
+    esac
+done
+
+if [[ ! -d "$PWD" ]]; then
+    echo "Erreur : Le répertoire local $PWD n'existe pas."
+    exit 1
+fi
+
+### 📌 Fonction : Générer la liste des fichiers depuis le serveur
+function generate_server_file_list() {
+    echo "🔄 Génération de la liste des fichiers du serveur..."
+    lftp -e "
+    set ftp:list-options -a;
+    open $BOOKMARK;
+    ls -R > "$RESULT_FILE"
+    bye;" > /dev/null 2>&1
+}
+
+### 📌 Fonction : Filtrer et nettoyer la liste des fichiers
+function process_file_list() {
+    echo "🔄 Traitement des fichiers..."
+
+    # Vérifier que le fichier existe avant de continuer
+    if [[ ! -s "$RESULT_FILE" ]]; then
+        echo "❌ Erreur : Impossible de récupérer la liste des fichiers."
+        return 1
+    fi
+
+    # Vérification et extraction des types MIME si -m est activé
+    if [[ "$CHECK_MISSING" -eq 1 ]]; then
+        local args=("$@")
+
+        # Tableau associatif des catégories MIME
+        declare -A MIME_MAP
+        MIME_MAP["videos"]="^video/"
+        MIME_MAP["livres"]="^(application/epub|application/pdf|application/vnd.amazon|application/msword|application/vnd.openxmlformats-officedocument.wordprocessingml)"
+
+        # Exclure "-m" des arguments traités
+        MIME_CATEGORIES=()
+        PARSE_MODE=0
+
+        for arg in "$@"; do
+            if [[ "$arg" == "-m" ]]; then
+                PARSE_MODE=1
+                continue
+            fi
+            if [[ "$PARSE_MODE" -eq 1 ]]; then
+                MIME_CATEGORIES+=("$arg")
+            fi
+        done
+
+        echo "📌 Catégories demandées : ${MIME_CATEGORIES[*]}"
+
+        # Construction de la liste des extensions
+        EXTENSIONS=""
+        for category in "${MIME_CATEGORIES[@]}"; do
+            if [[ -n "${MIME_MAP[$category]}" ]]; then
+                echo "🔍 Recherche des extensions pour : $category"
+                
+                MIME_EXT=$(grep -E "${MIME_MAP[$category]}" /etc/mime.types | awk '{for (i=2; i<=NF; i++) print $i}' | tr '\n' '|' | tr -s ' ' | sed 's/|$//')
+
+                if [[ -z "$MIME_EXT" ]]; then
+                    echo "⚠️ Aucune extension trouvée pour $category !"
+                else
+                    echo "✔ Extensions trouvées : $MIME_EXT"
+                    EXTENSIONS+="$MIME_EXT|"
+                fi
+            else
+                echo "⚠️ Catégorie inconnue : $category"
+            fi
+        done
+
+        # Supprimer le dernier '|' s'il existe
+        EXTENSIONS="${EXTENSIONS%|}"
+
+        # Vérifier que la liste des extensions est valide
+        if [[ -z "$EXTENSIONS" ]]; then
+            echo "❌ Erreur : Aucune extension récupérée ! Types disponibles : \"vieos\", \"livres\""
+            exit 1
+        fi
+
+        echo "📺 Extensions finales : $EXTENSIONS"
+
+        # Expression régulière pour exclure les fichiers de formation
+        NUMERATION="^([0-9]+([._-][0-9]+)?[._-]?[ ]?)"
+
+        # Exécution d awk pour filtrer uniquement les fichiers vidéo et livres sans numérotation indicative de formation
+        awk -v ext_list="$EXTENSIONS" -v numeration="$NUMERATION" '{
+            if ($1 ~ /^-/) {  
+                name = "";
+                for (i=9; i<=NF; i++) {
+                    name = name $i " ";
+                }
+
+                # Suppression de l espace final si présent
+                if (substr(name, length(name), 1) == " ") {
+                    name = substr(name, 1, length(name) - 1);
+                }
+
+                # Vérifie si le fichier appartient aux types MIME demandés et ne suit pas une numérotation indicative de formation
+                if (name ~ ("\\.(" ext_list ")$") && name !~ numeration) {
+                    print name;
+                }
+            }
+        }' "${RESULT_FILE}" > "${RESULT_FILE}_filtered_clean"
+
+    else
+        # Filtrage des résultats normaux (recherche texte)
+        filtered_result=$(cat "$RESULT_FILE")
+    
+        if [[ -s "$RESULT_FILE" ]]; then
+            for term in "${SEARCH_TERMS[@]}"; do
+                term=$(echo "$term" | tr -d '\n' | tr -d '\r')
+
+                if [[ -n "$term" ]]; then
+                    filtered_result=$(echo "$filtered_result" | grep -iF "$term" || true)
+                fi
+            done
+        else
+            echo "Erreur : Fichier de résultats vide."
+            return
+        fi
+
+        # Vérifier si la recherche a trouvé quelque chose
+        if [[ -z "$filtered_result" ]]; then
+            echo "Aucun fichier trouvé correspondant aux critères : ${SEARCH_TERMS[*]}."
+            return
+        else
+            echo "$filtered_result" > "${RESULT_FILE}_filtered"
+        fi
+
+        awk '{
+            if ($1 ~ /^[dl-]/) {
+                for (i=9; i<=NF; i++) {
+                    printf "%s ", $i;
+                }
+                print "";
+            }
+        }' "${RESULT_FILE}_filtered" | sed 's/ $//' > "${RESULT_FILE}_filtered_clean" #TODO Dégager les noms de dossier
+    fi
+}
+
+
+### 📌 Fonction : Générer les chemins absolus
+function generate_absolute_paths() {
+    echo "🔄 Génération des chemins absolus..."
+    
+    awk '
+    /:$/ { current_dir = substr($0, 1, length($0) - 1); next }
+    !/:$/ && $1 !~ /^d/ && $NF != "." && $NF != ".." {
+        print current_dir "/" substr($0, index($0, $9))
+    }' "$RESULT_FILE" > "${RESULT_FILE}_abs_paths"
+
+    awk '{sub(/\/[^\/]+ [0-9]+ +[0-9]+ +[A-Z][a-z]{2} [0-9]{1,2} [0-9]{2}:[0-9]{2} /, "/")}1' "${RESULT_FILE}_abs_paths" > "${RESULT_FILE}_abs_paths.tmp"
+    mv "${RESULT_FILE}_abs_paths.tmp" "${RESULT_FILE}_abs_paths"
+}
+
+### 📌 Fonction : Rechercher et télécharger les fichiers
+function search_and_download() {
+    echo "🔎 Recherche des fichiers contenant : ${SEARCH_TERMS[*]}"
+
+    # Générer et traiter la liste des fichiers
+    generate_server_file_list
+    process_file_list
+    generate_absolute_paths
+
+    echo -e "📄 Résultats trouvés :\e[35m"
+
+    # Ajouter des numéros devant chaque fichier pour faciliter le choix
+    nl -w2 -s' ' "${RESULT_FILE}_filtered_clean" > "${RESULT_FILE}_filtered_numbered"
+
+    cat "${RESULT_FILE}_filtered_numbered"
+    echo -e "\e[0m"
+
+    while true; do
+        read -p "Voulez-vous télécharger ces fichiers ? (o : tout, n : annuler, numéros séparés par espace : sélection, autre : affiner) " choice
+        
+        case $choice in
+            [oOyY]* )  # ✅ Télécharger tout
+                selected_files=($(awk '{print $2}' "${RESULT_FILE}_filtered_clean"))
+                ;;
+            [nN]* )  # ❌ Annuler
+                echo "❌ Recherche abandonnée."
+                break
+                ;;
+            *[0-9]* )  # 🔢 Téléchargement sélectif via numéros
+                selected_files=()
+                for num in $choice; do
+                    file=$(sed -n "${num}p" "${RESULT_FILE}_filtered_clean")
+                    echo "ligne $num"
+                    echo "$file"
+                    if [[ -n "$file" ]]; then
+                        selected_files+=("$file")
+                    else
+                        echo "⚠️ Numéro $num invalide, ignoré."
+                    fi
+                done
+                ;;
+            * )  # 🔍 Recherche continue avec nouveaux critères
+                SEARCH_TERMS+=("$choice")
+                search_and_download
+                return
+                ;;
+        esac
+
+        if [[ ${#selected_files[@]} -eq 0 ]]; then
+            echo "⚠️ Aucun fichier sélectionné, veuillez recommencer."
+            continue
+        fi
+
+        echo "📥 Téléchargement des fichiers sélectionnés..."
+
+        sed 's/\t/ /g; s/  */ /g; s/^ *//; s/ *$//' "${RESULT_FILE}_abs_paths" > "${RESULT_FILE}_abs_paths_clean"
+
+        for line in "${selected_files[@]}"; do
+            echo "📥 Téléchargement de : \"$line\""
+            
+            normalized_line=$(echo "$line" | sed 's/^ *//; s/ *$//; s/  */ /g')
+            matching_line=$(grep -F "$normalized_line" "${RESULT_FILE}_abs_paths_clean")
+
+
+            if [[ -n "$matching_line" ]]; then
+            echo $matching_line #TODO gérer les fichiers qui ont le même nom ? pour "solution" ici le retour est ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/02. Basics Variables, Data Types, Operators & Functions/14. Time to Practice Variables, Constants, Operators & Core Data Types/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/02. Basics Variables, Data Types, Operators & Functions/26. Time to Practice Functions/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/04. Working with Control Structures (if Statements, Loops, Error Handling)/35. Time to Practice Control Structures/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/06. More on Functions/19. Time to Practice Functions/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/07. Working with the DOM (Browser HTML Code) in JavaScript/12. Time to Practice DOM Querying/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/08. More on Arrays & Iterables/28. Time to Practice Arrays & Iterables/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/10. Classes & Object-oriented Programming (OOP)/22. Time to Practice Classes & OOP/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/35. Bonus Web Components/21. Time to Practice - The Basics/solution.mp4
+                line_number=$(grep -n -F "$matching_line" "${RESULT_FILE}_abs_paths_clean" | cut -d: -f1)
+                absolute_path=$(sed -n "${line_number}p" "${RESULT_FILE}_abs_paths")
+echo $line_number
+echo $absolute_path
+                if [[ -z "$absolute_path" ]]; then
+                    echo "❌ Erreur : Chemin absolu introuvable pour \"$line\"."
+                    continue
+                fi
+
+                echo "📂 Commande : pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/"
+
+                lftp -c "
+                set ftp:list-options -a;
+                set ftp:use-stat -a;
+                set net:idle 10;
+                set net:timeout 30;
+                set cmd:fail-exit yes;
+                set ftp:passive-mode on;
+                open $BOOKMARK;
+                pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/;
+                bye;
+                "
+            else
+                echo "❌ Aucun fichier trouvé correspondant à '$line'"
+                exit 1
+            fi
+        done
+
+        echo "✅ Téléchargement terminé."
+        break
+    done
+}
+
+### 📌 Fonction : Comparer les fichiers avec ceux en local
+function check_missing_files() {
+    echo "📂 Comparaison des fichiers entre le serveur et le local..."
+
+    # Générer et traiter la liste des fichiers
+    generate_server_file_list
+    process_file_list "$@"
+
+    find "$LOCAL_PATH" -type f -printf "%f\n" > /tmp/local_files.txt
+    missing_files=$(comm -23 <(sort "${RESULT_FILE}_filtered_clean") <(sort /tmp/local_files.txt))
+
+    if [[ -z "$missing_files" ]]; then
+        echo "✅ Tous les fichiers sont déjà présents en local."
+        exit 0
+    fi
+
+    echo "🚀 Fichiers absents en local :"
+    echo "$missing_files" | tee /tmp/missing_files.txt
+}
+
+### 📌 Exécution principale ###
+if [[ -z $1 ]]; then
+    echo "Usage : wgets2 \"texte_de_recherche\""
+    exit 1
+fi
+
+if [[ "$CHECK_MISSING" -eq 1 ]]; then
+    check_missing_files "$@"
+    exit 0
+else
+    SEARCH_TERMS=("$@")
+    search_and_download
+fi
+
+if [[ "$DEBUG_MODE" -eq 0 ]]; then
+    echo "🧹 Nettoyage des fichiers temporaires..."
+    rm -f "$RESULT_FILE" \
+          "${RESULT_FILE}_filtered" \
+          "${RESULT_FILE}_filtered_clean" \
+          "${RESULT_FILE}_abs_paths" \
+          "${RESULT_FILE}_abs_paths_clean"
+fi
