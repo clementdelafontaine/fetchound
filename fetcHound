@@ -176,6 +176,10 @@ function process_file_list() {
             exit 0
         else
             echo "$filtered_result" > "${RESULT_FILE}_filtered"
+
+	    if [[ "$OR_SEARCH" -eq 1 ]]; then
+	        sed -i '1d' "${RESULT_FILE}_filtered"
+	    fi
         fi
 
         sed 's/ $//' > "${RESULT_FILE}_filtered_clean" "${RESULT_FILE}_filtered" #TODO télécharger les fichiers missing 
@@ -208,11 +212,10 @@ function search_and_download() {
 
     echo -e "📄 Résultats trouvés :\e[35m"
 
+   # sed -i '1d' "${RESULT_FILE}_filtered_clean"
+    #sed -i '1d' "${RESULT_FILE}_filtered"
     # Ajouter des numéros devant chaque fichier pour faciliter le choix
     nl -w2 -s' ' "${RESULT_FILE}_filtered_clean" > "${RESULT_FILE}_filtered_numbered"
-    sed -i '1d' "${RESULT_FILE}_filtered_clean"
-    sed -i '1d' "${RESULT_FILE}_filtered_numbered"
-    sed -i '1d' "${RESULT_FILE}_filtered"
     
     cat "${RESULT_FILE}_filtered_numbered"
     echo -e "\e[0m"
