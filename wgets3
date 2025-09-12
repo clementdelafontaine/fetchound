@@ -1,0 +1,196 @@
+#!/bin/bash
+
+# Nom du bookmark pour lftp
+DEBUG_MODE=0  # Mettre à 1 pour activer le mode débogage (ne pas supprimer les fichiers temporaires)
+BOOKMARK="seedbox"
+REMOTE_PATH="/data/complete/"
+MEDIA_PATH="/home/share/"
+LOCAL_PATH=$(echo "$PWD" | sed "s/'/\\'/g" | sed 's/ /\\ /g')
+RESULT_FILE="/tmp/search_sdbx_result.txt"
+SEARCH_TERMS=() # Tableau pour stocker les termes de recherche cumulés
+
+# Vérifier si l'option -m ou --missing est passée
+CHECK_MISSING=0
+
+for arg in "$@"; do
+    case "$arg" in
+        -m|--missing)
+            CHECK_MISSING=1
+            ;;
+    esac
+done
+
+if [[ ! -d "$PWD" ]]; then
+    echo "Erreur : Le répertoire local $PWD n'existe pas."
+    exit 1
+fi
+
+### 🔹 1️⃣ Lister les fichiers sur le serveur ###
+function generate_server_file_list() {
+    echo "🔄 Génération de la liste des fichiers du serveur..."
+    lftp -e "
+    set ftp:list-options -a;
+    open $BOOKMARK;
+    ls -R > "$RESULT_FILE"
+    bye;" > /dev/null
+   
+    if [[ ! -s "$RESULT_FILE" ]]; then
+        echo "❌ Erreur : Impossible de récupérer la liste des fichiers du serveur."
+        exit 1
+    fi
+}
+
+### 🔹 2️⃣ Filtrer et nettoyer les fichiers ###
+function filter_file_list() {
+    echo "🔄 Filtrage des fichiers..."
+
+    grep -v '^d' "$RESULT_FILE" > "${RESULT_FILE}_filtered"
+    awk '{for (i=9; i<=NF; i++) printf $i " "; print ""}' "${RESULT_FILE}_filtered" \
+        | sed 's/ $//' \
+        | grep -E '\.(mkv|mp4|avi|mov|flv|m4v)$' > "${RESULT_FILE}_filtered_clean"
+}
+
+### 🔹 3️⃣ Générer les chemins absolus ###
+function generate_absolute_paths() {
+    echo "🔄 Génération des chemins absolus..."
+    
+    awk '
+    /:$/ { current_dir = substr($0, 1, length($0) - 1); next }
+    !/:$/ && $1 !~ /^d/ && $NF != "." && $NF != ".." {
+        print current_dir "/" substr($0, index($0, $9))
+    }' "$RESULT_FILE" > "${RESULT_FILE}_abs_paths"
+
+    awk '{sub(/\/[^\/]+ [0-9]+ +[0-9]+ +[A-Z][a-z]{2} [0-9]{1,2} [0-9]{2}:[0-9]{2} /, "/")}1' "${RESULT_FILE}_abs_paths" > "${RESULT_FILE}_abs_paths.tmp"
+    mv "${RESULT_FILE}_abs_paths.tmp" "${RESULT_FILE}_abs_paths"
+}
+
+### 🔹 4️⃣ Supprimer les fichiers temporaires ###
+function cleanup_files() {
+    if [[ "$DEBUG_MODE" -eq 0 ]]; then
+        echo "🧹 Suppression des fichiers temporaires..."
+        rm -f "$RESULT_FILE" \
+              "${RESULT_FILE}_filtered" \
+              "${RESULT_FILE}_filtered_clean" \
+              "${RESULT_FILE}_abs_paths"
+    fi
+}
+
+### 🔹 5️⃣ Rechercher et télécharger les fichiers ###
+function search_and_download() {
+    echo "🔎 Recherche des fichiers contenant : ${SEARCH_TERMS[*]}"
+
+    # Générer et traiter la liste des fichiers
+    generate_server_file_list
+    filter_file_list
+    generate_absolute_paths
+
+    # Appliquer la recherche
+    filtered_result=$(cat "${RESULT_FILE}_filtered_clean")
+    for term in "${SEARCH_TERMS[@]}"; do
+        term=$(echo "$term" | tr -d '\n' | tr -d '\r')
+        if [[ -n "$term" ]]; then
+            filtered_result=$(echo "$filtered_result" | grep -iF "$term" || true)
+        fi
+    done
+
+    if [[ -z "$filtered_result" ]]; then
+        echo "❌ Aucun fichier trouvé pour : ${SEARCH_TERMS[*]}."
+        return
+    fi
+
+    echo -e "📄 Résultats trouvés :\e[35m"
+    echo "$filtered_result"
+    echo -e "\e[0m"
+    while true; do
+        read -p "Voulez-vous télécharger ces fichiers ? (o/n pour valider, ou entrez un nouveau terme pour affiner) " choice
+        case $choice in
+            [oOyY]* )
+                # Télécharger les fichiers trouvés
+                echo "Téléchargement des fichiers..."
+
+    # Télécharger les fichiers trouvés
+    while IFS= read -r line; do
+        if [[ -z "$line" ]]; then continue; fi
+
+        echo "📥 Téléchargement de : \"$line\""
+
+        # Vérifier le chemin absolu
+        matching_line=$(grep -F "$line" "${RESULT_FILE}_abs_paths")
+        if [[ -z "$matching_line" ]]; then
+            echo "❌ Erreur : Chemin absolu introuvable pour \"$line\"."
+            continue
+        fi
+
+        absolute_path="$matching_line"
+        if [[ "$DEBUG_MODE" -eq 1 ]]; then
+            echo "Commande : pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/"
+        fi
+
+        # Exécuter la commande de téléchargement
+        lftp -c "
+        set ftp:list-options -a;
+        set ftp:use-stat -a;
+        set net:idle 10; 
+        set net:timeout 30;
+        set cmd:fail-exit yes;
+        set ftp:passive-mode on;
+        open $BOOKMARK;
+        pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/;
+        bye;
+        "
+    done <<< "$filtered_result"
+                echo "Téléchargement terminé."
+                break
+                ;;
+            [nN]* )
+                echo "Recherche abandonnée."
+                break
+                ;;
+            * )
+                SEARCH_TERMS+=("$choice") # Ajouter le nouveau terme au tableau
+                search_and_download # Relancer la recherche avec les termes mis à jour
+                break
+                ;;
+                
+        esac
+    done
+}
+
+### 🔹 6️⃣ Comparer les fichiers manquants ###
+function check_missing_files() {
+    echo "📂 Comparaison des fichiers entre le serveur et le local..."
+
+    # Générer et traiter la liste des fichiers
+    generate_server_file_list
+    filter_file_list
+    generate_absolute_paths
+
+    # Lister les fichiers en local
+    find "$MEDIA_PATH" -type f -exec basename {} \; > /tmp/local_files.txt
+
+    # Comparer serveur vs local
+    missing_files=$(comm -23 <(sort "${RESULT_FILE}_filtered_clean") <(sort /tmp/local_files.txt))
+
+    if [[ -z "$missing_files" ]]; then
+        echo "✅ Tous les fichiers sont déjà présents en local."
+        exit 0
+    fi
+
+    echo "🚀 Fichiers absents en local :"
+    echo "$missing_files" | tee /tmp/missing_files.txt
+}
+
+### 🔹 Exécution du script ###
+if [[ -z $1 ]]; then
+    echo "Usage : wgets2 \"texte_de_recherche\""
+    exit 1
+fi
+
+if [[ "$CHECK_MISSING" -eq 1 ]]; then
+    check_missing_files
+    exit 0
+fi
+
+SEARCH_TERMS=("$@") # Ajouter tous les arguments passés au script
+search_and_download
+cleanup_files

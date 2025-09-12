@@ -7,7 +7,20 @@ REMOTE_PATH="/data/complete/"
 LOCAL_PATH=$(echo "$PWD" | sed "s/'/\\'/g" | sed 's/ /\\ /g')
 RESULT_FILE="/tmp/search_sdbx_result"
 SEARCH_TERMS=() # Tableau pour stocker les termes de recherche cumulés
-
+# Vérifier si des arguments sont fournis
+if [[ $@ -eq 0 ]]; then
+    # Lire depuis stdin si aucun argument n'est fourni
+    while IFS= read -r line; do
+        SEARCH_TERMS+=("$line")
+    done
+    if [[ ${#SEARCH_TERMS[@]} -eq 0 ]]; then
+        echo "Erreur : Aucun terme de recherche fourni ni via argument ni via stdin."
+        exit 1
+    fi
+else
+    # Sinon, utiliser les arguments classiques
+    SEARCH_TERMS=("$@")
+fi
 # Vérifier si l'option -m ou --missing est passée
 CHECK_MISSING=0
 OR_SEARCH=0
@@ -131,7 +144,7 @@ function process_file_list() {
                     print name;
                 }
             }
-        }' "${RESULT_FILE}" > "${RESULT_FILE}_filtered_clean"
+        }' "${RESULT_FILE}" > "${RESULT_FILE}_filtered_clean" #TODO ici ne pas nettoyer les noms de fichiers pour comparer avec les vrais noms
 
     else
         # Filtrage des résultats normaux (recherche texte)
@@ -182,7 +195,7 @@ function process_file_list() {
 	    fi
         fi
 
-        sed 's/ $//' > "${RESULT_FILE}_filtered_clean" "${RESULT_FILE}_filtered" #TODO télécharger les fichiers missing 
+        sed 's/ $//' > "${RESULT_FILE}_filtered_clean" "${RESULT_FILE}_filtered" #TODO télécharger les fichiers missing TODO faire la différence de fichier avec les vrais nons avant nettoyage 
     fi
 }
 
@@ -296,8 +309,8 @@ function search_and_download() {
                     continue
                 fi
 
-                echo "📂 Commande : pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/"
-
+                echo "📂 Commande : pget -n 2 -c \"$absolute_path\" -o $LOCAL_PATH/"
+#TODO une seule connexion pour tous les téléchargements
                 lftp -c "
         	set ftp:list-options -a;
                 set ftp:use-stat -a;
@@ -306,7 +319,7 @@ function search_and_download() {
                 set cmd:fail-exit yes;
                 set ftp:passive-mode on;
                 open $BOOKMARK;
-                pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/;
+                pget -n 2 -c \"$absolute_path\" -o $LOCAL_PATH/;
                 bye;
                 " 
             echo "📥 Téléchargement des fichiers sélectionnés..."
@@ -330,8 +343,8 @@ function check_missing_files() {
     generate_server_file_list
     process_file_list "$@"
 
-    find "$LOCAL_PATH" -type f -printf "%f\n" > /tmp/local_files.txt #TODO spécifier le chemin en paramètre
-    missing_files=$(comm -23 <(sort "${RESULT_FILE}_filtered_clean") <(sort /tmp/local_files.txt))
+    find "$LOCAL_PATH" -type f -printf "%f\n" > /tmp/local_files.txt #TODO spécifier le chemin en paramètre TODO lignes vides qui se glissent dans les résultats
+    missing_files=$(comm -23 <(sort "${RESULT_FILE}_") <(sort /tmp/local_files.txt))
 
     if [[ -z "$missing_files" ]]; then
         echo "✅ Tous les fichiers sont déjà présents en local."
@@ -339,25 +352,25 @@ function check_missing_files() {
     fi
 
     echo "🚀 Fichiers absents en local :"
+    echo -e "📄 Résultats trouvés :\e[35m"
     echo "$missing_files" | tee /tmp/missing_files.txt
+    echo -e "📄 Résultats trouvés :\e[0m"
 }
 
 ### 📌 Exécution principale ###
-if [[ -z $1 ]]; then
-    echo "Usage : wgets2 \"texte_de_recherche\""
+if [[ -z $SEARCH_TERMS ]]; then
+    echo "Usage : fetchound \"texte_de_recherche\""
     exit 1
 fi
 
 if [[ "$CHECK_MISSING" -eq 1 ]]; then
-    check_missing_files "$@"
+    check_missing_files $SEARCH_TERMS 
     exit 0
 else
-    SEARCH_TERMS=("$@")
     search_and_download
 fi
  echo "or-search : $OR_SEARCH";   
 if [[ "$DEBUG_MODE" -eq 0 ]]; then
-    echo "🧹 Nettoyage des fichiers temporaires..."
     rm -f "$RESULT_FILE" \
           "${RESULT_FILE}_filtered" \
           "${RESULT_FILE}_filtered_clean" \
