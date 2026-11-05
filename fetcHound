@@ -6,6 +6,7 @@ BOOKMARK="seedbox"
 REMOTE_PATH="/data/complete/"
 LOCAL_PATH=$(echo "$PWD" | sed "s/'/\\'/g" | sed 's/ /\\ /g')
 RESULT_FILE="/tmp/search_sdbx_result"
+TMP_DOWNLOAD_DIR=$(mktemp -d /tmp/fetcHound_dl.XXXXXX) # Dossier temporaire de téléchargement avant déplacement vers le dossier courant
 SEARCH_TERMS=() # Tableau pour stocker les termes de recherche cumulés
 
 # Vérifier si l'option -m ou --missing est passée
@@ -296,7 +297,7 @@ function search_and_download() {
                     continue
                 fi
 
-                echo "📂 Commande : pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/"
+                echo "📂 Commande : pget -n 2 -c \"$absolute_path\" -o $TMP_DOWNLOAD_DIR/"
 
                 lftp -c "
         	set ftp:list-options -a;
@@ -306,10 +307,18 @@ function search_and_download() {
                 set cmd:fail-exit yes;
                 set ftp:passive-mode on;
                 open $BOOKMARK;
-                pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/;
+                pget -n 2 -c \"$absolute_path\" -o $TMP_DOWNLOAD_DIR/;
                 bye;
-                " 
-            echo "📥 Téléchargement des fichiers sélectionnés..."
+                "
+
+                # Déplacement du fichier téléchargé vers le dossier courant
+                downloaded_file="$TMP_DOWNLOAD_DIR/$(basename "$absolute_path")"
+                if [[ -f "$downloaded_file" ]]; then
+                    echo "📦 Déplacement de \"$(basename "$absolute_path")\" vers $PWD/"
+                    mv "$downloaded_file" "$PWD/"
+                else
+                    echo "❌ Erreur : fichier téléchargé introuvable dans $TMP_DOWNLOAD_DIR/"
+                fi
 
 	    else
                 echo "❌ Aucun fichier trouvé correspondant à '$line'"
@@ -363,4 +372,5 @@ if [[ "$DEBUG_MODE" -eq 0 ]]; then
           "${RESULT_FILE}_filtered_clean" \
           "${RESULT_FILE}_abs_paths" \
           "${RESULT_FILE}_abs_paths_clean"
+    rmdir "$TMP_DOWNLOAD_DIR" 2>/dev/null
 fi
