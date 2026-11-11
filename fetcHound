@@ -140,7 +140,8 @@ function process_file_list() {
 	if [[ $KEEP_DIRECTORY -eq 0 ]]; then
 	    sed '/^d/d' "${RESULT_FILE}" > "${RESULT_FILE}_t";
 	else
-	    cat "${RESULT_FILE}" > "${RESULT_FILE}_";
+	    # Mode -d : ne conserver que les dossiers
+	    grep '^d' "${RESULT_FILE}" > "${RESULT_FILE}_t";
 	fi
 
 	awk '{
@@ -192,9 +193,9 @@ function process_file_list() {
 function generate_absolute_paths() {
     echo "🔄 Génération des chemins absolus..."
     
-    awk '
+    awk -v keep_dir="$KEEP_DIRECTORY" '
     /:$/ { current_dir = substr($0, 1, length($0) - 1); next }
-    !/:$/ && $1 !~ /^d/ && $NF != "." && $NF != ".." {
+    !/:$/ && ($1 !~ /^d/ || keep_dir == 1) && $NF != "." && $NF != ".." {
         print current_dir "/" substr($0, index($0, $9))
     }' "$RESULT_FILE" > "${RESULT_FILE}_abs_paths"
 
@@ -265,13 +266,17 @@ function search_and_download() {
 
         for line in "${selected_files[@]}"; do
 	    echo "$line";
-	    # Vérifier si c'est un dossier (pas d'extension détectée) TODO gérer le téléchargement des dossiers
-            if [[ ! "$line" =~ \.[a-zA-Z0-9]{2,4}$ ]]; then
-                read -p "⚠️ \"$line\" est un dossier. Voulez-vous le télécharger ? (o/n) " confirm_dir
+	    # Vérifier si c'est un dossier (mode -d ou pas d'extension détectée)
+            IS_DIRECTORY=0
+            if [[ $KEEP_DIRECTORY -eq 1 ]]; then
+                IS_DIRECTORY=1
+            elif [[ ! "$line" =~ \.[a-zA-Z0-9]{2,4}$ ]]; then
+                read -p "⚠️ \"$line\" est un dossier. Voulez-vous télécharger son contenu ? (o/n) " confirm_dir
                 if [[ "$confirm_dir" =~ ^[nN]$ ]]; then
                     echo "⏭️ Dossier \"$line\" ignoré."
-                    continue  # Passer au fichier suivant
+                    continue  # Passer au dossier suivant
                 fi
+                IS_DIRECTORY=1
             fi
 
             echo "📥 Téléchargement de : \"$line\""
@@ -297,9 +302,35 @@ function search_and_download() {
                     continue
                 fi
 
-                echo "📂 Commande : pget -n 2 -c \"$absolute_path\" -o $TMP_DOWNLOAD_DIR/"
+                if [[ $IS_DIRECTORY -eq 1 ]]; then
+                    # Téléchargement récursif du contenu du dossier via mirror
+                    dir_name=$(basename "$absolute_path")
+                    echo "📂 Commande : mirror --parallel=2 --use-pget-n=2 \"$absolute_path\" $TMP_DOWNLOAD_DIR/$dir_name"
 
-                lftp -c "
+                    lftp -c "
+        	set ftp:list-options -a;
+                set ftp:use-stat -a;
+                set net:idle 10;
+                set net:timeout 30;
+                set cmd:fail-exit yes;
+                set ftp:passive-mode on;
+                open $BOOKMARK;
+                mirror --parallel=2 --use-pget-n=2 \"$absolute_path\" \"$TMP_DOWNLOAD_DIR/$dir_name\";
+                bye;
+                "
+
+                    # Déplacement du dossier téléchargé vers le dossier courant
+                    downloaded_dir="$TMP_DOWNLOAD_DIR/$dir_name"
+                    if [[ -d "$downloaded_dir" ]]; then
+                        echo "📦 Déplacement de \"$dir_name\" vers $PWD/"
+                        mv "$downloaded_dir" "$PWD/"
+                    else
+                        echo "❌ Erreur : dossier téléchargé introuvable dans $TMP_DOWNLOAD_DIR/"
+                    fi
+                else
+                    echo "📂 Commande : pget -n 2 -c \"$absolute_path\" -o $TMP_DOWNLOAD_DIR/"
+
+                    lftp -c "
         	set ftp:list-options -a;
                 set ftp:use-stat -a;
                 set net:idle 10;
@@ -311,13 +342,14 @@ function search_and_download() {
                 bye;
                 "
 
-                # Déplacement du fichier téléchargé vers le dossier courant
-                downloaded_file="$TMP_DOWNLOAD_DIR/$(basename "$absolute_path")"
-                if [[ -f "$downloaded_file" ]]; then
-                    echo "📦 Déplacement de \"$(basename "$absolute_path")\" vers $PWD/"
-                    mv "$downloaded_file" "$PWD/"
-                else
-                    echo "❌ Erreur : fichier téléchargé introuvable dans $TMP_DOWNLOAD_DIR/"
+                    # Déplacement du fichier téléchargé vers le dossier courant
+                    downloaded_file="$TMP_DOWNLOAD_DIR/$(basename \"$absolute_path\")"
+                    if [[ -f "$downloaded_file" ]]; then
+                        echo "📦 Déplacement de \"$(basename \"$absolute_path\")\" vers $PWD/"
+                        mv "$downloaded_file" "$PWD/"
+                    else
+                        echo "❌ Erreur : fichier téléchargé introuvable dans $TMP_DOWNLOAD_DIR/"
+                    fi
                 fi
 
 	    else
