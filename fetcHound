@@ -89,19 +89,38 @@ human_size() {
     }'
 }
 
-# Animation de téléchargement : spinner ASCII + taille + durée, pendant
-# l'exécution d'une commande en arrière-plan ($1 = pid, $2 = chemin surveillé)
+# Animation de téléchargement façon pacman, pendant l'exécution d'une
+# commande en arrière-plan :
+#   - $1 = pid de la commande, $2 = chemin local surveillé
+#   - $3 = taille totale attendue (optionnelle) ; si fournie : barre de
+#     progression [####----] + pourcentage, sinon spinner + taille seule
 animate_progress() {
-    local pid="$1" watch_path="$2"
+    local pid="$1" watch_path="$2" total="${3:-0}"
     local start=$(( $(date +%s) ))
-    local spin='-\|/' i=0 size elapsed
+    local spin='-\|/' i=0 size elapsed filled pct
+    local bar_width=30 bar_full bar_empty
 
     while kill -0 "$pid" 2>/dev/null; do
         size=$(du -sb "$watch_path" 2>/dev/null | cut -f1)
         size=${size:-0}
         elapsed=$(( $(date +%s) - start ))
-        printf "\r    ${C_CYAN}[%s]${C_RESET} ${C_DIM}%s${C_RESET} ${C_DIM}-- %3ds${C_RESET}   " \
-            "${spin:i++ % 4:1}" "$(human_size "$size")" "$elapsed"
+
+        if (( total > 0 )); then
+            # Barre de progression style pacman
+            filled=$(( size * bar_width / total ))
+            (( filled > bar_width )) && filled=$bar_width
+            pct=$(( size * 100 / total ))
+            (( pct > 100 )) && pct=100
+            bar_full=$(printf '%*s' "$filled" '' | tr ' ' '#')
+            bar_empty=$(printf '%*s' $(( bar_width - filled )) '' | tr ' ' '-')
+            printf "\r    ${C_CYAN}[${C_GREEN}%s${C_CYAN}%s]${C_RESET} ${C_GREEN}%3d%%${C_RESET} %s / %s ${C_DIM}[%s] %3ds${C_RESET}   " \
+                "$bar_full" "$bar_empty" "$pct" "$(human_size "$size")" "$(human_size "$total")" \
+                "${spin:i++ % 4:1}" "$elapsed"
+        else
+            # Spinner seul (taille totale inconnue)
+            printf "\r    ${C_CYAN}[%s]${C_RESET} ${C_DIM}%s${C_RESET} ${C_DIM}-- %3ds${C_RESET}   " \
+                "${spin:i++ % 4:1}" "$(human_size "$size")" "$elapsed"
+        fi
         sleep 0.2
     done
     return 0
@@ -315,15 +334,16 @@ generate_absolute_paths() {
 # ──────────────────────────── Téléchargements ─────────────────────────
 
 # Exécute une commande lftp en arrière-plan avec l'animation de progression
-# $1 = chemin local surveillé pour la taille, $2.. = commande lftp
+# $1 = chemin local surveillé pour la taille, $2 = taille totale attendue
+# (0 si inconnue), $3.. = commande lftp
 run_lftp_animated() {
-    local watch_path="$1"
-    shift
+    local watch_path="$1" total="$2"
+    shift 2
     local rc=0
 
     "$@" > /dev/null &
     local pid=$!
-    animate_progress "$pid" "$watch_path"
+    animate_progress "$pid" "$watch_path" "$total"
     wait "$pid" || rc=$?
 
     printf "\r%*s\r" 60 ""   # efface la ligne d'animation
@@ -337,10 +357,16 @@ download_file() {
     local file_name
     file_name=$(basename "$absolute_path")
 
-    info "Fichier : $file_name"
+    # Taille totale du fichier distant (pour la barre de progression)
+    local remote_size
+    remote_size=$(grep -F "$file_name" "$RESULT_FILE" | head -n 1 \
+                  | awk '$1 ~ /^-/ {print $5}')
+    remote_size=${remote_size:-0}
+
+    info "Fichier : $file_name ($(human_size "$remote_size"))"
     printf "      ${C_DIM}pget -n 2 -c %s${C_RESET}\n" "$absolute_path"
 
-    run_lftp_animated "$TMP_DOWNLOAD_DIR" \
+    run_lftp_animated "$TMP_DOWNLOAD_DIR/$file_name" "$remote_size" \
         lftp -c "
         $LFTP_SETTINGS
         open $BOOKMARK;
@@ -368,7 +394,7 @@ download_directory() {
     info "Dossier : $dir_name/"
     printf "      ${C_DIM}mirror --parallel=2 --use-pget-n=2 %s${C_RESET}\n" "$absolute_path"
 
-    run_lftp_animated "$TMP_DOWNLOAD_DIR/$dir_name" \
+    run_lftp_animated "$TMP_DOWNLOAD_DIR/$dir_name" 0 \
         lftp -c "
         $LFTP_SETTINGS
         open $BOOKMARK;
