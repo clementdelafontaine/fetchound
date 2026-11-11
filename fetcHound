@@ -1,250 +1,572 @@
 #!/bin/bash
+#
+# fetcHound — Récupération de fichiers depuis un serveur FTP (basé sur lftp)
+#
+# Usage :
+#   fetcHound [options] "terme1" "terme2"...
+#
+# Options :
+#   -m, --missing <catégories>   Liste les fichiers du serveur absents en local
+#                                 (catégories disponibles : videos, livres)
+#   -o, --or                      Recherche OU : les termes sont alternatifs
+#   -d, --directory               Recherche limitée aux dossiers uniquement ;
+#                                 leur contenu est téléchargé récursivement via mirror
+#
 
-# Nom du bookmark pour lftp
-DEBUG_MODE=1  # Mettre à 1 pour activer le mode débogage (ne pas supprimer les fichiers temporaires)
-BOOKMARK="seedbox"
-REMOTE_PATH="/data/complete/"
-LOCAL_PATH=$(echo "$PWD" | sed "s/'/\\'/g" | sed 's/ /\\ /g')
+# ──────────────────────────── Configuration ────────────────────────────
+
+BOOKMARK="seedbox"                 # Nom du bookmark lftp
+DEBUG_MODE=1                       # 1 = conserve les fichiers temporaires
 RESULT_FILE="/tmp/search_sdbx_result"
-SEARCH_TERMS=() # Tableau pour stocker les termes de recherche cumulés
+# Dossier temporaire STABLE, dérivé du dossier de destination : les fichiers
+# partiels y survivent entre deux exécutions, ce qui permet à pget -c / mirror
+# de reprendre un téléchargement interrompu là où il s'était arrêté
+TMP_DOWNLOAD_DIR="/tmp/fetcHound_dl_$(printf '%s' "$PWD" | md5sum | cut -c1-12)"
+mkdir -p "$TMP_DOWNLOAD_DIR"
 
-# Vérifier si l'option -m ou --missing est passée
-CHECK_MISSING=0
-OR_SEARCH=0
-KEEP_DIRECTORY=0
+# Paramètres lftp communs à tous les transferts
+LFTP_SETTINGS='set ftp:list-options -a;
+        set ftp:use-stat -a;
+        set net:idle 10;
+        set net:timeout 30;
+        set cmd:fail-exit yes;
+        set ftp:passive-mode on;'
 
-for arg in "$@"; do
-    case "$arg" in
-        -m|--missing)
-            CHECK_MISSING=1
-            ;;
-         -o|--or)
-	    OR_SEARCH=1
-	    shift
-	    ;;
-	 -d|--directory)
-	    KEEP_DIRECTORY=1
-	    shift
-	    ;;
-    esac
-done
+# ──────────────────────────── Affichage (TUI) ─────────────────────────
 
-if [[ ! -d "$PWD" ]]; then
-    echo "Erreur : Le répertoire local $PWD n'existe pas."
-    exit 1
+# Couleurs (désactivées si sortie non-interactive)
+if [[ -t 1 ]]; then
+    C_RESET="\e[0m";  C_BOLD="\e[1m";   C_DIM="\e[2m"
+    C_CYAN="\e[36m";  C_GREEN="\e[32m"; C_YELLOW="\e[33m"; C_RED="\e[31m"
+else
+    C_RESET=""; C_BOLD=""; C_DIM=""; C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""
 fi
 
-### 📌 Fonction : Générer la liste des fichiers depuis le serveur
-function generate_server_file_list() {
-    echo "🔄 Génération de la liste des fichiers du serveur..."
+banner() {
+    printf "${C_CYAN}${C_BOLD}"
+    cat << 'ASCII'
++============================================+
+|  f e t c H o u n d   ::   FTP  fetcher     |
++============================================+
+ASCII
+    printf "${C_RESET}"
+}
+
+# :: Titre de section (style pacman)
+header() {
+    printf "\n${C_CYAN}${C_BOLD}::${C_RESET} ${C_BOLD}%s${C_RESET}\n" "$1"
+}
+
+# ==> Étape / information
+info() {
+    printf "  ${C_CYAN}==>${C_RESET} %s\n" "$1"
+}
+
+# [ OK ] Succès
+ok() {
+    printf "  ${C_GREEN}[ OK ]${C_RESET} %s\n" "$1"
+}
+
+# [!!] Avertissement
+warn() {
+    printf "  ${C_YELLOW}[!!]${C_RESET} %s\n" "$1"
+}
+
+# [XX] Erreur
+err() {
+    printf "  ${C_RED}[XX]${C_RESET} %s\n" "$1"
+}
+
+# Ligne de résultat (mode listing)
+result_line() {
+    printf "  ${C_CYAN}%s${C_RESET} %s\n" "$1" "$2"
+}
+
+# Taille lisible (1234567 -> "1.2 MiB")
+human_size() {
+    awk -v b="$1" 'BEGIN {
+        split("B KiB MiB GiB TiB", units, " ")
+        i = 1
+        while (b >= 1024 && i < 5) { b /= 1024; i++ }
+        if (i == 1) printf "%d %s", b, units[i]
+        else printf "%.1f %s", b, units[i]
+    }'
+}
+
+# Temps restant estimé (mm:ss ou hh:mm:ss) à partir du débit constaté
+format_eta() {
+    local seconds="$1"
+    if (( seconds < 0 )); then seconds=0; fi
+    local h=$(( seconds / 3600 )) m=$(( (seconds % 3600) / 60 )) s=$(( seconds % 60 ))
+    if (( h > 0 )); then
+        printf "%d:%02d:%02d" "$h" "$m" "$s"
+    else
+        printf "%02d:%02d" "$m" "$s"
+    fi
+}
+
+# Animation de téléchargement façon pacman, pendant l'exécution d'une
+# commande en arrière-plan :
+#   - $1 = pid de la commande, $2 = chemin local surveillé
+#   - $3 = taille totale attendue (optionnelle) ; si fournie : barre de
+#     progression [####----] + pourcentage, sinon spinner + taille seule
+animate_progress() {
+    local pid="$1" watch_path="$2" total="${3:-0}"
+    local start=$(( $(date +%s) ))
+    local spin='-\|/' i=0 size elapsed filled pct
+    # Largeur de barre adaptée au terminal :
+    # largeur écran - marge pour "[ ] 100% 999.9 GiB / 999.9 GiB [-] 999s"
+    local bar_width
+    bar_width=$(( $(tput cols 2>/dev/null || echo 80) - 46 ))
+    (( bar_width < 10 )) && bar_width=10
+    local bar_full bar_empty
+
+    while kill -0 "$pid" 2>/dev/null; do
+        size=$(du -sb "$watch_path" 2>/dev/null | cut -f1)
+        size=${size:-0}
+        elapsed=$(( $(date +%s) - start ))
+
+        if (( total > 0 )); then
+            # Barre de progression style pacman : le pacman (C/c) avance en
+            # mangeant les points medians, derriere lui restent des tirets
+            pos=$(( size * bar_width / total ))
+            (( pos >= bar_width )) && pos=$(( bar_width - 1 ))
+            pct=$(( size * 100 / total ))
+            (( pct > 100 )) && pct=100
+
+            # Temps restant estimé (débit = taille / temps écoulé)
+            local eta=""
+            if (( size > 1024 && elapsed > 0 )); then
+                eta="ETA $(format_eta $(( (total - size) * elapsed / size )))"
+            fi
+            if (( pct >= 100 )); then
+                pac_char='C'
+                eaten=$(printf '%*s' "$bar_width" '' | tr ' ' '-')
+                dots=''
+            else
+                pac_char='C'
+                (( i % 2 )) && pac_char='c'
+                eaten=$(printf '%*s' "$pos" '' | tr ' ' '-')
+                dots=$(printf '%*s' $(( bar_width - pos - 1 )) '' | sed 's/ /·/g')
+            fi
+            printf "\r    ${C_CYAN}[${C_GREEN}%s${C_YELLOW}%s${C_CYAN}%s]${C_RESET} ${C_GREEN}%3d%%${C_RESET} %s / %s ${C_DIM}%s [%s] %3ds${C_RESET}   " \
+                "$eaten" "$pac_char" "$dots" "$pct" "$(human_size "$size")" "$(human_size "$total")" \
+                "$eta" "${spin:i++ % 4:1}" "$elapsed"
+        else
+            # Spinner seul (taille totale inconnue)
+            printf "\r    ${C_CYAN}[%s]${C_RESET} ${C_DIM}%s${C_RESET} ${C_DIM}-- %3ds${C_RESET}   " \
+                "${spin:i++ % 4:1}" "$(human_size "$size")" "$elapsed"
+        fi
+        sleep 0.2
+    done
+    return 0
+}
+
+# ──────────────────────────── Options (CLI) ───────────────────────────
+
+CHECK_MISSING=0                    # -m : comparaison serveur/local
+OR_SEARCH=0                        # -o : recherche OU au lieu de ET
+KEEP_DIRECTORY=0                   # -d : recherche limitée aux dossiers
+SHOW_COMMANDS=0                    # --debug : affiche les commandes lftp exécutées
+SEARCH_TERMS=()                    # termes de recherche cumulés
+MIME_CATEGORIES=()                 # catégories pour le mode -m
+
+usage() {
+    cat <<EOF
+Usage : $(basename "$0") [options] "terme_de_recherche"...
+
+Options :
+  -m, --missing <catégories>   Liste les fichiers du serveur absents en local
+                               (catégories : videos, livres)
+  -o, --or                     Recherche OU (n'importe quel terme) au lieu de ET (tous les termes)
+  -d, --directory              Recherche limitée aux dossiers ; leur contenu est
+                               téléchargé récursivement via mirror
+      --debug                  Affiche les commandes lftp exécutées (pget/mirror)
+  -h, --help                   Affiche cette aide
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -m|--missing)
+                CHECK_MISSING=1
+                shift
+                while [[ $# -gt 0 && ! "$1" =~ ^- ]]; do
+                    MIME_CATEGORIES+=("$1")
+                    shift
+                done
+                ;;
+            -o|--or)
+                OR_SEARCH=1
+                shift
+                ;;
+            -d|--directory)
+                KEEP_DIRECTORY=1
+                shift
+                ;;
+            --debug)
+                SHOW_COMMANDS=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                SEARCH_TERMS+=("$1")
+                shift
+                ;;
+        esac
+    done
+}
+
+# ──────────────────────────── Serveur FTP ──────────────────────────────
+
+# Génération de la liste récursive des fichiers du serveur
+generate_server_file_list() {
+    header "Interrogation du serveur"
     lftp -e "
     set ftp:list-options -a;
     open $BOOKMARK;
-    ls -R > "$RESULT_FILE"
+    ls -R > $RESULT_FILE
     bye;" > /dev/null 2>&1
-
 }
 
-### 📌 Fonction : Filtrer et nettoyer la liste des fichiers
-function process_file_list() {
-    echo "🔄 Traitement des fichiers..."
+# ──────────────────────── Traitement des listes ────────────────────────
 
-    # Vérifier que le fichier existe avant de continuer
+# Point d'entrée du traitement : aiguille selon le mode
+process_file_list() {
     if [[ ! -s "$RESULT_FILE" ]]; then
-        echo "❌ Erreur : Impossible de récupérer la liste des fichiers."
+        err "Impossible de récupérer la liste des fichiers."
         return 1
     fi
 
-    # Vérification et extraction des types MIME si -m est activé
-    if [[ "$CHECK_MISSING" -eq 1 ]]; then
-        local args=("$@")
-
-        # Tableau associatif des catégories MIME
-        declare -A MIME_MAP
-        MIME_MAP["videos"]="^video/"
-        MIME_MAP["livres"]="^(application/epub|application/pdf|application/vnd.amazon|application/msword|application/vnd.openxmlformats-officedocument.wordprocessingml)"
-
-        # Exclure "-m" des arguments traités
-        MIME_CATEGORIES=()
-        PARSE_MODE=0
-
-        for arg in "$@"; do
-            if [[ "$arg" == "-m" ]]; then
-                PARSE_MODE=1
-                continue
-            fi
-            if [[ "$PARSE_MODE" -eq 1 ]]; then
-                MIME_CATEGORIES+=("$arg")
-            fi
-        done
-
-        echo "📌 Catégories demandées : ${MIME_CATEGORIES[*]}"
-
-        # Construction de la liste des extensions
-        EXTENSIONS=""
-        for category in "${MIME_CATEGORIES[@]}"; do
-            if [[ -n "${MIME_MAP[$category]}" ]]; then
-                echo "🔍 Recherche des extensions pour : $category"
-                
-                MIME_EXT=$(grep -E "${MIME_MAP[$category]}" /etc/mime.types | awk '{for (i=2; i<=NF; i++) print $i}' | tr '\n' '|' | tr -s ' ' | sed 's/|$//')
-
-                if [[ -z "$MIME_EXT" ]]; then
-                    echo "⚠️ Aucune extension trouvée pour $category !"
-                else
-                    echo "✔ Extensions trouvées : $MIME_EXT"
-                    EXTENSIONS+="$MIME_EXT|"
-                fi
-            else
-                echo "⚠️ Catégorie inconnue : $category"
-            fi
-        done
-
-        # Supprimer le dernier '|' s'il existe
-        EXTENSIONS="${EXTENSIONS%|}"
-
-        # Vérifier que la liste des extensions est valide
-        if [[ -z "$EXTENSIONS" ]]; then
-            echo "❌ Erreur : Aucune extension récupérée ! Types disponibles : \"videos\", \"livres\""
-            exit 1
-        fi
-
-        echo "📺 Extensions finales : $EXTENSIONS"
-
-        # Expression régulière pour exclure les fichiers de formation
-        NUMERATION="^([0-9]+([._-][0-9]+)?[._-]?[ ]?)"
-
-        # Exécution d awk pour filtrer uniquement les fichiers vidéo et livres sans numérotation indicative de formation
-        awk -v ext_list="$EXTENSIONS" -v numeration="$NUMERATION" '{
-            if ($1 ~ /^-/) {  
-                name = "";
-                for (i=9; i<=NF; i++) {
-                    name = name $i " ";
-                }
-
-                # Suppression de l espace final si présent
-                if (substr(name, length(name), 1) == " ") {
-                    name = substr(name, 1, length(name) - 1);
-                }
-
-                # Vérifie si le fichier appartient aux types MIME demandés et ne suit pas une numérotation indicative de formation
-                if (name ~ ("\\.(" ext_list ")$") && name !~ numeration) {
-                    print name;
-                }
-            }
-        }' "${RESULT_FILE}" > "${RESULT_FILE}_filtered_clean"
-
+    if [[ $CHECK_MISSING -eq 1 ]]; then
+        process_missing_list
     else
-        # Filtrage des résultats normaux (recherche texte)
-	
-	if [[ $KEEP_DIRECTORY -eq 0 ]]; then
-	    sed '/^d/d' "${RESULT_FILE}" > "${RESULT_FILE}_t";
-	else
-	    cat "${RESULT_FILE}" > "${RESULT_FILE}_";
-	fi
-
-	awk '{
-    	if ($1 ~ /^[dl-]/) {
-            print substr($0, index($0, $9));
-    	  }	
-	}' "${RESULT_FILE}_t" > "${RESULT_FILE}_"
-
-
-	if [[ "$OR_SEARCH" -eq 0 ]]; then
-	    filtered_result=$(cat "${RESULT_FILE}_")
-	fi
-	
-	if [[ -s "${RESULT_FILE}_" ]]; then
-            for term in "${SEARCH_TERMS[@]}"; do
-                term=$(echo "$term" | tr -d '\n' | tr -d '\r')
-                
-		if [[ -n "$term" ]]; then
-                    if [[ "$OR_SEARCH" -eq 1 ]]; then
-			filtered_result+=$'\n'$(cat "${RESULT_FILE}_" | grep -iF "$term" || true)
-		    else
-			filtered_result=$(echo "$filtered_result" | grep -iF "$term" || true)
-		    fi
-                fi
-            done
-        else
-            echo "Erreur : Fichier de résultats vide."
-            return
-        fi
-
-        # Vérifier si la recherche a trouvé quelque chose
-        if [[ -z "$filtered_result" ]]; then
-            echo "Aucun fichier trouvé correspondant aux critères : ${SEARCH_TERMS[*]}."
-            exit 0
-        else
-            echo "$filtered_result" > "${RESULT_FILE}_filtered"
-
-	    if [[ "$OR_SEARCH" -eq 1 ]]; then
-	        sed -i '1d' "${RESULT_FILE}_filtered"
-	    fi
-        fi
-
-        sed 's/ $//' > "${RESULT_FILE}_filtered_clean" "${RESULT_FILE}_filtered" #TODO télécharger les fichiers missing 
+        process_search_list
     fi
 }
 
+# Mode -m : filtrage par catégories MIME (vidéos, livres)
+process_missing_list() {
+    declare -A MIME_MAP=(
+        ["videos"]="^video/"
+        ["livres"]="^(application/epub|application/pdf|application/vnd.amazon|application/msword|application/vnd.openxmlformats-officedocument.wordprocessingml)"
+    )
 
-### 📌 Fonction : Générer les chemins absolus
-function generate_absolute_paths() {
-    echo "🔄 Génération des chemins absolus..."
-    
-    awk '
+    info "Catégories demandées : ${MIME_CATEGORIES[*]}"
+
+    # Construction de la liste des extensions à partir de /etc/mime.types
+    local EXTENSIONS="" category mime_ext
+    for category in "${MIME_CATEGORIES[@]}"; do
+        if [[ -n "${MIME_MAP[$category]:-}" ]]; then
+            info "Extensions pour : $category"
+            mime_ext=$(grep -E "${MIME_MAP[$category]}" /etc/mime.types \
+                       | awk '{for (i=2; i<=NF; i++) print $i}' \
+                       | tr '\n' '|' | tr -s ' ' | sed 's/|$//')
+            if [[ -z "$mime_ext" ]]; then
+                warn "Aucune extension trouvée pour $category"
+            else
+                ok "Extensions : $mime_ext"
+                EXTENSIONS+="$mime_ext|"
+            fi
+        else
+            warn "Catégorie inconnue : $category"
+        fi
+    done
+    EXTENSIONS="${EXTENSIONS%|}"
+
+    if [[ -z "$EXTENSIONS" ]]; then
+        err "Aucune extension récupérée ! Types disponibles : \"videos\", \"livres\""
+        exit 1
+    fi
+
+    info "Extensions finales : $EXTENSIONS"
+
+    # Exclut les fichiers dont le nom suit une numérotation indicative de formation
+    local NUMERATION='^([0-9]+([._-][0-9]+)?[._-]?[ ]?)'
+
+    awk -v ext_list="$EXTENSIONS" -v numeration="$NUMERATION" '{
+        if ($1 ~ /^-/) {
+            name = "";
+            for (i=9; i<=NF; i++) {
+                name = name $i " ";
+            }
+
+            # Suppression de l espace final si présent
+            if (substr(name, length(name), 1) == " ") {
+                name = substr(name, 1, length(name) - 1);
+            }
+
+            # Vérifie si le fichier appartient aux types MIME demandés
+            # et ne suit pas une numérotation indicative de formation
+            if (name ~ ("\\." ext_list ")$") && name !~ numeration) {
+                print name;
+            }
+        }
+    }' "$RESULT_FILE" > "${RESULT_FILE}_filtered_clean"
+}
+
+# Mode recherche : filtrage texte (ET ou OU) sur les fichiers, ou sur les
+# dossiers uniquement si -d est actif
+process_search_list() {
+    # Extrait les noms ; en mode -d on ne garde que les dossiers
+    if [[ $KEEP_DIRECTORY -eq 1 ]]; then
+        grep '^d' "$RESULT_FILE" > "${RESULT_FILE}_t"
+    else
+        sed '/^d/d' "$RESULT_FILE" > "${RESULT_FILE}_t"
+    fi
+
+    awk '{
+        if ($1 ~ /^[dl-]/) {
+            print substr($0, index($0, $9));
+        }
+    }' "${RESULT_FILE}_t" > "${RESULT_FILE}_"
+
+    if [[ ! -s "${RESULT_FILE}_" ]]; then
+        warn "Fichier de résultats vide."
+        return 1
+    fi
+
+    # Filtrage par les termes de recherche (ET par défaut, OU avec -o)
+    local filtered_result="" term
+    if [[ $OR_SEARCH -eq 0 ]]; then
+        filtered_result=$(cat "${RESULT_FILE}_")
+    fi
+
+    for term in "${SEARCH_TERMS[@]}"; do
+        term=$(echo "$term" | tr -d '\n' | tr -d '\r')
+        if [[ -z "$term" ]]; then
+            continue
+        fi
+        if [[ $OR_SEARCH -eq 1 ]]; then
+            filtered_result+=$'\n'$(grep -iF "$term" "${RESULT_FILE}_" || true)
+        else
+            filtered_result=$(echo "$filtered_result" | grep -iF "$term" || true)
+        fi
+    done
+
+    if [[ -z "$filtered_result" ]]; then
+        warn "Aucun fichier trouvé pour les critères : ${SEARCH_TERMS[*]}"
+        exit 0
+    fi
+
+    echo "$filtered_result" > "${RESULT_FILE}_filtered"
+    if [[ $OR_SEARCH -eq 1 ]]; then
+        sed -i '1d' "${RESULT_FILE}_filtered"   # retire la ligne vide initiale
+    fi
+    sed 's/ $//' "${RESULT_FILE}_filtered" > "${RESULT_FILE}_filtered_clean"
+}
+
+# Génère les chemins absolus des entrées (dossiers inclus si -d)
+generate_absolute_paths() {
+    awk -v keep_dir="$KEEP_DIRECTORY" '
     /:$/ { current_dir = substr($0, 1, length($0) - 1); next }
-    !/:$/ && $1 !~ /^d/ && $NF != "." && $NF != ".." {
+    !/:$/ && ($1 !~ /^d/ || keep_dir == 1) && $NF != "." && $NF != ".." {
         print current_dir "/" substr($0, index($0, $9))
     }' "$RESULT_FILE" > "${RESULT_FILE}_abs_paths"
 
-    awk '{sub(/\/[^\/]+ [0-9]+ +[0-9]+ +[A-Z][a-z]{2} [0-9]{1,2} [0-9]{2}:[0-9]{2} /, "/")}1' "${RESULT_FILE}_abs_paths" > "${RESULT_FILE}_abs_paths.tmp"
+    awk '{sub(/\/[^\/]+ [0-9]+ +[0-9]+ +[A-Z][a-z]{2} [0-9]{1,2} [0-9]{2}:[0-9]{2} /, "/")}1' \
+        "${RESULT_FILE}_abs_paths" > "${RESULT_FILE}_abs_paths.tmp"
     mv "${RESULT_FILE}_abs_paths.tmp" "${RESULT_FILE}_abs_paths"
 }
 
-### 📌 Fonction : Rechercher et télécharger les fichiers
-function search_and_download() {
-    echo "🔎 Recherche des fichiers contenant : ${SEARCH_TERMS[*]}"
+# ──────────────────────────── Téléchargements ─────────────────────────
 
-    # Générer et traiter la liste des fichiers
+# Exécute une commande lftp en arrière-plan avec l'animation de progression
+# $1 = chemin local surveillé pour la taille, $2 = taille totale attendue
+# (0 si inconnue), $3.. = commande lftp
+run_lftp_animated() {
+    local watch_path="$1" total="$2"
+    shift 2
+    local rc=0
+
+    "$@" > /dev/null &
+    local pid=$!
+    animate_progress "$pid" "$watch_path" "$total"
+    wait "$pid" || rc=$?
+
+    # Efface la ligne d'animation sur toute la largeur du terminal
+    printf "\r%*s\r" "$(tput cols 2>/dev/null || echo 80)" ""
+    return "$rc"
+}
+
+# Télécharge un fichier unique via pget (chunks réduits) puis le déplace
+# vers le dossier courant
+download_file() {
+    local absolute_path="$1"
+    local file_name
+    file_name=$(basename "$absolute_path")
+
+    # Taille totale du fichier distant (pour la barre de progression)
+    local remote_size
+    remote_size=$(grep -F "$file_name" "$RESULT_FILE" | head -n 1 \
+                  | awk '$1 ~ /^-/ {print $5}')
+    remote_size=${remote_size:-0}
+
+    # Fichier déjà présent en local ? (même taille -> ignoré)
+    if [[ -f "$PWD/$file_name" ]]; then
+        local local_size
+        local_size=$(stat -c%s "$PWD/$file_name" 2>/dev/null || echo 0)
+        if [[ -n "$remote_size" && "$remote_size" -gt 0 && "$local_size" == "$remote_size" ]]; then
+            warn "Déjà présent, ignoré : $file_name"
+            return 0
+        fi
+        warn "Présent localement avec une taille différente, retéléchargement : $file_name"
+    fi
+
+    info "Fichier : $file_name ($(human_size "$remote_size"))"
+    if [[ $SHOW_COMMANDS -eq 1 ]]; then
+        printf "      ${C_DIM}pget -n 2 -c %s${C_RESET}\n" "$absolute_path"
+    fi
+
+    run_lftp_animated "$TMP_DOWNLOAD_DIR/$file_name" "$remote_size" \
+        lftp -c "
+        $LFTP_SETTINGS
+        open $BOOKMARK;
+        pget -n 2 -c \"$absolute_path\" -o $TMP_DOWNLOAD_DIR/;
+        bye;" || return 1
+
+    # Déplacement du fichier téléchargé vers le dossier courant
+    local downloaded_file="$TMP_DOWNLOAD_DIR/$file_name"
+    if [[ -f "$downloaded_file" ]]; then
+        mv "$downloaded_file" "$PWD/"
+        ok "$file_name — $(human_size "$(stat -c%s "$PWD/$file_name")")"
+    else
+        err "Fichier téléchargé introuvable dans $TMP_DOWNLOAD_DIR/"
+        return 1
+    fi
+}
+
+# Télécharge récursivement le contenu d'un dossier via mirror puis le
+# déplace vers le dossier courant
+download_directory() {
+    local absolute_path="$1"
+    local dir_name
+    dir_name=$(basename "$absolute_path")
+
+    # Dossier déjà présent en local ? -> ignoré
+    if [[ -d "$PWD/$dir_name" ]]; then
+        warn "Déjà présent, ignoré : $dir_name/"
+        return 0
+    fi
+
+    info "Dossier : $dir_name/"
+    if [[ $SHOW_COMMANDS -eq 1 ]]; then
+        printf "      ${C_DIM}mirror --parallel=2 --use-pget-n=2 %s${C_RESET}\n" "$absolute_path"
+    fi
+
+    run_lftp_animated "$TMP_DOWNLOAD_DIR/$dir_name" 0 \
+        lftp -c "
+        $LFTP_SETTINGS
+        open $BOOKMARK;
+        mirror --parallel=2 --use-pget-n=2 \"$absolute_path\" \"$TMP_DOWNLOAD_DIR/$dir_name\";
+        bye;" || return 1
+
+    # Déplacement du dossier téléchargé vers le dossier courant
+    local downloaded_dir="$TMP_DOWNLOAD_DIR/$dir_name"
+    if [[ -d "$downloaded_dir" ]]; then
+        mv "$downloaded_dir" "$PWD/"
+        ok "$dir_name/ — $(du -sh "$PWD/$dir_name" 2>/dev/null | cut -f1)"
+    else
+        err "Dossier téléchargé introuvable dans $TMP_DOWNLOAD_DIR/"
+        return 1
+    fi
+}
+
+# Télécharge une sélection : résout le chemin absolu, détecte s'il s'agit
+# d'un dossier et aiguille vers pget ou mirror
+download_selection() {
+    local line="$1"
+    local is_directory=0
+
+    # Dossier ? (mode -d, ou absence d'extension détectée)
+    if [[ $KEEP_DIRECTORY -eq 1 ]]; then
+        is_directory=1
+    elif [[ ! "$line" =~ \.[a-zA-Z0-9]{2,4}$ ]]; then
+        local confirm_dir
+        read -r -p "  $line est un dossier. Télécharger son contenu ? (o/n) " confirm_dir
+        if [[ "$confirm_dir" =~ ^[nN]$ ]]; then
+            warn "Dossier ignoré : $line"
+            return 0
+        fi
+        is_directory=1
+    fi
+
+    # Résolution du chemin absolu correspondant à la sélection
+    # (première correspondance si plusieurs chemins contiennent le terme)
+    local normalized_line matching_line line_number absolute_path
+    normalized_line=$(echo "$line" | sed 's/^ *//; s/ *$//; s/  */ /g')
+    matching_line=$(grep -F "$normalized_line" "${RESULT_FILE}_abs_paths_clean" | head -n 1 || true)
+
+    if [[ -z "$matching_line" ]]; then
+        err "Aucun fichier trouvé correspondant à : $line"
+        return 1
+    fi
+
+    line_number=$(grep -n -F "$matching_line" "${RESULT_FILE}_abs_paths_clean" | cut -d: -f1 | head -n 1)
+    absolute_path=$(sed -n "${line_number}p" "${RESULT_FILE}_abs_paths")
+
+    if [[ -z "$absolute_path" ]]; then
+        err "Chemin absolu introuvable pour : $line"
+        return 1
+    fi
+
+    if [[ $is_directory -eq 1 ]]; then
+        download_directory "$absolute_path"
+    else
+        download_file "$absolute_path"
+    fi
+}
+
+# ──────────────────────── Recherche interactive ────────────────────────
+
+# Recherche et propose le téléchargement interactif des résultats
+search_and_download() {
+    banner
+    header "Recherche"
+    info "Termes : ${SEARCH_TERMS[*]}"
+
     generate_server_file_list
-    process_file_list
+    process_file_list || return 1
     generate_absolute_paths
 
-    echo -e "📄 Résultats trouvés :\e[35m"
+    # Nettoyage des chemins absolus (tabs/espaces multiples)
+    sed -e 's/\t/ /g; s/  */ /g; s/^ *//; s/ *$//' \
+        "${RESULT_FILE}_abs_paths" > "${RESULT_FILE}_abs_paths_clean"
 
-   # sed -i '1d' "${RESULT_FILE}_filtered_clean"
-    #sed -i '1d' "${RESULT_FILE}_filtered"
-    # Ajouter des numéros devant chaque fichier pour faciliter le choix
-    nl -w2 -s' ' "${RESULT_FILE}_filtered_clean" > "${RESULT_FILE}_filtered_numbered"
-    
-    cat "${RESULT_FILE}_filtered_numbered"
-    echo -e "\e[0m"
+    # Affichage numéroté des résultats
+    header "Résultats"
+    nl -w2 -s' ' "${RESULT_FILE}_filtered_clean" | tee "${RESULT_FILE}_filtered_numbered" \
+        | while read -r num name; do result_line "$num" "$name"; done
 
+    local selected_files=() choice num file line
     while true; do
-        read -p "Voulez-vous télécharger ces fichiers ? (o : tout, n : annuler, numéros séparés par espace : sélection, autre : affiner) " choice
-        
+        printf "\n"
+        read -r -p "  Télécharger ? (o : tout, n : annuler, numéros séparés par espace : sélection, autre : affiner) " choice
+
         case $choice in
-            [oOyY]* )  # ✅ Télécharger tout
-		readarray -t selected_files < "${RESULT_FILE}_filtered_clean"
-		;;
-            [nN]* )  # ❌ Annuler
-                echo "❌ Recherche abandonnée."
+            [oOyY]*)  # Tout télécharger
+                mapfile -t selected_files < "${RESULT_FILE}_filtered_clean"
+                ;;
+            [nN]*)    # Annuler
+                warn "Recherche abandonnée."
                 break
                 ;;
-            *[0-9]* )  # 🔢 Téléchargement sélectif via numéros
+            *[0-9]*)  # Téléchargement sélectif via numéros
                 selected_files=()
                 for num in $choice; do
                     file=$(sed -n "${num}p" "${RESULT_FILE}_filtered_clean")
-                    echo "ligne $num"
-                    echo "$file"
                     if [[ -n "$file" ]]; then
                         selected_files+=("$file")
                     else
-                        echo "⚠️ Numéro $num invalide, ignoré."
+                        warn "Numéro $num invalide, ignoré"
                     fi
                 done
                 ;;
-            * )  # 🔍 Recherche continue avec nouveaux critères
+            *)        # Recherche continue avec nouveaux critères
                 SEARCH_TERMS+=("$choice")
                 search_and_download
                 return
@@ -252,115 +574,84 @@ function search_and_download() {
         esac
 
         if [[ ${#selected_files[@]} -eq 0 ]]; then
-            echo "⚠️ Aucun fichier sélectionné, veuillez recommencer."
+            warn "Aucune sélection, veuillez recommencer."
             continue
         fi
 
-        echo "📥 Téléchargement des fichiers sélectionnés..."
-
-	CLEANUP_RULES='s/\t/ /g; s/  */ /g; s/^ *//; s/ *$//'
-	
-	sed -e "$CLEANUP_RULES" "${RESULT_FILE}_abs_paths" > "${RESULT_FILE}_abs_paths_clean"
-
+        header "Téléchargement (${#selected_files[@]} élément(s))"
         for line in "${selected_files[@]}"; do
-	    echo "$line";
-	    # Vérifier si c'est un dossier (pas d'extension détectée) TODO gérer le téléchargement des dossiers
-            if [[ ! "$line" =~ \.[a-zA-Z0-9]{2,4}$ ]]; then
-                read -p "⚠️ \"$line\" est un dossier. Voulez-vous le télécharger ? (o/n) " confirm_dir
-                if [[ "$confirm_dir" =~ ^[nN]$ ]]; then
-                    echo "⏭️ Dossier \"$line\" ignoré."
-                    continue  # Passer au fichier suivant
-                fi
-            fi
-
-            echo "📥 Téléchargement de : \"$line\""
-            
-            normalized_line=$(echo "$line" | sed 's/^ *//; s/ *$//; s/  */ /g')
-            matching_line=$(grep -F "$normalized_line" "${RESULT_FILE}_abs_paths_clean")
-
-            if [[ -n "$matching_line" ]]; then
-            echo $matching_line #TODO gérer les fichiers qui ont le même nom ? pour "solution" ici le retour est ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/02. Basics Variables, Data Types, Operators & Functions/14. Time to Practice Variables, Constants, Operators & Core Data Types/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/02. Basics Variables, Data Types, Operators & Functions/26. Time to Practice Functions/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/04. Working with Control Structures (if Statements, Loops, Error Handling)/35. Time to Practice Control Structures/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/06. More on Functions/19. Time to Practice Functions/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/07. Working with the DOM (Browser HTML Code) in JavaScript/12. Time to Practice DOM Querying/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/08. More on Arrays & Iterables/28. Time to Practice Arrays & Iterables/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/10. Classes & Object-oriented Programming (OOP)/22. Time to Practice Classes & OOP/solution.mp4 ./data/complete/JavaScript - The Complete Guide 2020 (Beginner + Advanced) - [Udemy][Anglais]/35. Bonus Web Components/21. Time to Practice - The Basics/solution.mp4
-                
-	        line_number=$(grep -n -F "$matching_line" "${RESULT_FILE}_abs_paths_clean" | cut -d: -f1)
-                absolute_path=$(sed -n "${line_number}p" "${RESULT_FILE}_abs_paths")
-		# absolute_path=$(grep -F "$matching_line" "${RESULT_FILE}_abs_paths" | sed 's/ /\\ /g; s/(/\\(/g; s/)/\\)/g')
-		
-		awk '{
-		    if ($1 ~ /^[dl-]/) {
-        	        print substr($0, index($0, $9));
-   		    }
-		}' "${RESULT_FILE}_t" > "${RESULT_FILE}_"
-
-                if [[ -z "$absolute_path" ]]; then
-                    echo "❌ Erreur : Chemin absolu introuvable pour \"$line\"."
-                    continue
-                fi
-
-                echo "📂 Commande : pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/"
-
-                lftp -c "
-        	set ftp:list-options -a;
-                set ftp:use-stat -a;
-                set net:idle 10;
-                set net:timeout 30;
-                set cmd:fail-exit yes;
-                set ftp:passive-mode on;
-                open $BOOKMARK;
-                pget -n 4 -c \"$absolute_path\" -o $LOCAL_PATH/;
-                bye;
-                " 
-            echo "📥 Téléchargement des fichiers sélectionnés..."
-
-	    else
-                echo "❌ Aucun fichier trouvé correspondant à '$line'"
-                exit 1
-            fi
+            download_selection "$line" || continue
         done
 
-        echo "✅ Téléchargement terminé."
+        ok "Téléchargement terminé."
         break
     done
 }
 
-### 📌 Fonction : Comparer les fichiers avec ceux en local
-function check_missing_files() {
-    echo "📂 Comparaison des fichiers entre le serveur et le local..."
+# ──────────────────────── Comparaison serveur/local ────────────────────
 
-    # Générer et traiter la liste des fichiers
+# Mode -m : liste les fichiers du serveur absents en local
+check_missing_files() {
+    banner
+    header "Comparaison serveur / local"
+
     generate_server_file_list
-    process_file_list "$@"
+    process_file_list || return 1
 
-    find "$LOCAL_PATH" -type f -printf "%f\n" > /tmp/local_files.txt #TODO spécifier le chemin en paramètre
+    find "$PWD" -type f -printf "%f\n" > /tmp/local_files.txt
+    local missing_files
     missing_files=$(comm -23 <(sort "${RESULT_FILE}_filtered_clean") <(sort /tmp/local_files.txt))
 
     if [[ -z "$missing_files" ]]; then
-        echo "✅ Tous les fichiers sont déjà présents en local."
+        ok "Tous les fichiers sont déjà présents en local."
         exit 0
     fi
 
-    echo "🚀 Fichiers absents en local :"
+    header "Fichiers absents en local"
     echo "$missing_files" | tee /tmp/missing_files.txt
 }
 
-### 📌 Exécution principale ###
-if [[ -z $1 ]]; then
-    echo "Usage : wgets2 \"texte_de_recherche\""
-    exit 1
-fi
+# ──────────────────────────── Nettoyage ───────────────────────────────
 
-if [[ "$CHECK_MISSING" -eq 1 ]]; then
-    check_missing_files "$@"
-    exit 0
-else
-    SEARCH_TERMS=("$@")
+cleanup() {
+    if [[ $DEBUG_MODE -eq 0 ]]; then
+        info "Nettoyage des fichiers temporaires..."
+        rm -f "$RESULT_FILE" \
+              "${RESULT_FILE}_t" \
+              "${RESULT_FILE}_" \
+              "${RESULT_FILE}_filtered" \
+              "${RESULT_FILE}_filtered_clean" \
+              "${RESULT_FILE}_filtered_numbered" \
+              "${RESULT_FILE}_abs_paths" \
+              "${RESULT_FILE}_abs_paths_clean"
+        rmdir "$TMP_DOWNLOAD_DIR" 2>/dev/null || true
+    fi
+}
+
+# ──────────────────────────── Exécution ───────────────────────────────
+
+main() {
+    if [[ $# -eq 0 ]]; then
+        usage
+        exit 1
+    fi
+
+    parse_args "$@"
+
+    if [[ $CHECK_MISSING -eq 1 ]]; then
+        check_missing_files
+        cleanup
+        exit 0
+    fi
+
+    if [[ ${#SEARCH_TERMS[@]} -eq 0 ]]; then
+        err "Aucun terme de recherche fourni."
+        usage
+        exit 1
+    fi
+
     search_and_download
-fi
- echo "or-search : $OR_SEARCH";   
-if [[ "$DEBUG_MODE" -eq 0 ]]; then
-    echo "🧹 Nettoyage des fichiers temporaires..."
-    rm -f "$RESULT_FILE" \
-          "${RESULT_FILE}_filtered" \
-          "${RESULT_FILE}_filtered_clean" \
-          "${RESULT_FILE}_abs_paths" \
-          "${RESULT_FILE}_abs_paths_clean"
-fi
+    cleanup
+}
+
+main "$@"
