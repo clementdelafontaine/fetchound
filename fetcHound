@@ -168,7 +168,7 @@ generate_server_file_list() {
     lftp -e "
     set ftp:list-options -a;
     open $BOOKMARK;
-    ls -R > \"$RESULT_FILE\"
+    ls -R > $RESULT_FILE
     bye;" > /dev/null 2>&1
 }
 
