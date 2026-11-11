@@ -18,7 +18,11 @@
 BOOKMARK="seedbox"                 # Nom du bookmark lftp
 DEBUG_MODE=1                       # 1 = conserve les fichiers temporaires
 RESULT_FILE="/tmp/search_sdbx_result"
-TMP_DOWNLOAD_DIR=$(mktemp -d /tmp/fetcHound_dl.XXXXXX)  # Téléchargements avant déplacement
+# Dossier temporaire STABLE, dérivé du dossier de destination : les fichiers
+# partiels y survivent entre deux exécutions, ce qui permet à pget -c / mirror
+# de reprendre un téléchargement interrompu là où il s'était arrêté
+TMP_DOWNLOAD_DIR="/tmp/fetcHound_dl_$(printf '%s' "$PWD" | md5sum | cut -c1-12)"
+mkdir -p "$TMP_DOWNLOAD_DIR"
 
 # Paramètres lftp communs à tous les transferts
 LFTP_SETTINGS='set ftp:list-options -a;
@@ -384,6 +388,17 @@ download_file() {
                   | awk '$1 ~ /^-/ {print $5}')
     remote_size=${remote_size:-0}
 
+    # Fichier déjà présent en local ? (même taille -> ignoré)
+    if [[ -f "$PWD/$file_name" ]]; then
+        local local_size
+        local_size=$(stat -c%s "$PWD/$file_name" 2>/dev/null || echo 0)
+        if [[ -n "$remote_size" && "$remote_size" -gt 0 && "$local_size" == "$remote_size" ]]; then
+            warn "Déjà présent, ignoré : $file_name"
+            return 0
+        fi
+        warn "Présent localement avec une taille différente, retéléchargement : $file_name"
+    fi
+
     info "Fichier : $file_name ($(human_size "$remote_size"))"
     if [[ $SHOW_COMMANDS -eq 1 ]]; then
         printf "      ${C_DIM}pget -n 2 -c %s${C_RESET}\n" "$absolute_path"
@@ -413,6 +428,12 @@ download_directory() {
     local absolute_path="$1"
     local dir_name
     dir_name=$(basename "$absolute_path")
+
+    # Dossier déjà présent en local ? -> ignoré
+    if [[ -d "$PWD/$dir_name" ]]; then
+        warn "Déjà présent, ignoré : $dir_name/"
+        return 0
+    fi
 
     info "Dossier : $dir_name/"
     if [[ $SHOW_COMMANDS -eq 1 ]]; then
