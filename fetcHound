@@ -145,6 +145,7 @@ animate_progress() {
 CHECK_MISSING=0                    # -m : comparaison serveur/local
 OR_SEARCH=0                        # -o : recherche OU au lieu de ET
 KEEP_DIRECTORY=0                   # -d : recherche limitée aux dossiers
+SHOW_COMMANDS=0                    # --debug : affiche les commandes lftp exécutées
 SEARCH_TERMS=()                    # termes de recherche cumulés
 MIME_CATEGORIES=()                 # catégories pour le mode -m
 
@@ -158,6 +159,7 @@ Options :
   -o, --or                     Recherche OU (n'importe quel terme) au lieu de ET (tous les termes)
   -d, --directory              Recherche limitée aux dossiers ; leur contenu est
                                téléchargé récursivement via mirror
+      --debug                  Affiche les commandes lftp exécutées (pget/mirror)
   -h, --help                   Affiche cette aide
 EOF
 }
@@ -179,6 +181,10 @@ parse_args() {
                 ;;
             -d|--directory)
                 KEEP_DIRECTORY=1
+                shift
+                ;;
+            --debug)
+                SHOW_COMMANDS=1
                 shift
                 ;;
             -h|--help)
@@ -379,7 +385,9 @@ download_file() {
     remote_size=${remote_size:-0}
 
     info "Fichier : $file_name ($(human_size "$remote_size"))"
-    printf "      ${C_DIM}pget -n 2 -c %s${C_RESET}\n" "$absolute_path"
+    if [[ $SHOW_COMMANDS -eq 1 ]]; then
+        printf "      ${C_DIM}pget -n 2 -c %s${C_RESET}\n" "$absolute_path"
+    fi
 
     run_lftp_animated "$TMP_DOWNLOAD_DIR/$file_name" "$remote_size" \
         lftp -c "
@@ -407,7 +415,9 @@ download_directory() {
     dir_name=$(basename "$absolute_path")
 
     info "Dossier : $dir_name/"
-    printf "      ${C_DIM}mirror --parallel=2 --use-pget-n=2 %s${C_RESET}\n" "$absolute_path"
+    if [[ $SHOW_COMMANDS -eq 1 ]]; then
+        printf "      ${C_DIM}mirror --parallel=2 --use-pget-n=2 %s${C_RESET}\n" "$absolute_path"
+    fi
 
     run_lftp_animated "$TMP_DOWNLOAD_DIR/$dir_name" 0 \
         lftp -c "
