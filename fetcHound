@@ -98,7 +98,12 @@ animate_progress() {
     local pid="$1" watch_path="$2" total="${3:-0}"
     local start=$(( $(date +%s) ))
     local spin='-\|/' i=0 size elapsed filled pct
-    local bar_width=30 bar_full bar_empty
+    # Largeur de barre adaptée au terminal :
+    # largeur écran - marge pour "[ ] 100% 999.9 GiB / 999.9 GiB [-] 999s"
+    local bar_width
+    bar_width=$(( $(tput cols 2>/dev/null || echo 80) - 46 ))
+    (( bar_width < 10 )) && bar_width=10
+    local bar_full bar_empty
 
     while kill -0 "$pid" 2>/dev/null; do
         size=$(du -sb "$watch_path" 2>/dev/null | cut -f1)
