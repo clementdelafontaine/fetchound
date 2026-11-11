@@ -106,15 +106,24 @@ animate_progress() {
         elapsed=$(( $(date +%s) - start ))
 
         if (( total > 0 )); then
-            # Barre de progression style pacman
-            filled=$(( size * bar_width / total ))
-            (( filled > bar_width )) && filled=$bar_width
+            # Barre de progression style pacman : le pacman (C/c) avance en
+            # mangeant les points medians, derriere lui restent des tirets
+            pos=$(( size * bar_width / total ))
+            (( pos >= bar_width )) && pos=$(( bar_width - 1 ))
             pct=$(( size * 100 / total ))
             (( pct > 100 )) && pct=100
-            bar_full=$(printf '%*s' "$filled" '' | tr ' ' '#')
-            bar_empty=$(printf '%*s' $(( bar_width - filled )) '' | tr ' ' '-')
-            printf "\r    ${C_CYAN}[${C_GREEN}%s${C_CYAN}%s]${C_RESET} ${C_GREEN}%3d%%${C_RESET} %s / %s ${C_DIM}[%s] %3ds${C_RESET}   " \
-                "$bar_full" "$bar_empty" "$pct" "$(human_size "$size")" "$(human_size "$total")" \
+            if (( pct >= 100 )); then
+                pac_char='C'
+                eaten=$(printf '%*s' "$bar_width" '' | tr ' ' '-')
+                dots=''
+            else
+                pac_char='C'
+                (( i % 2 )) && pac_char='c'
+                eaten=$(printf '%*s' "$pos" '' | tr ' ' '-')
+                dots=$(printf '%*s' $(( bar_width - pos - 1 )) '' | sed 's/ /·/g')
+            fi
+            printf "\r    ${C_CYAN}[${C_GREEN}%s${C_YELLOW}%s${C_CYAN}%s]${C_RESET} ${C_GREEN}%3d%%${C_RESET} %s / %s ${C_DIM}[%s] %3ds${C_RESET}   " \
+                "$eaten" "$pac_char" "$dots" "$pct" "$(human_size "$size")" "$(human_size "$total")" \
                 "${spin:i++ % 4:1}" "$elapsed"
         else
             # Spinner seul (taille totale inconnue)
