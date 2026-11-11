@@ -360,7 +360,8 @@ run_lftp_animated() {
     animate_progress "$pid" "$watch_path" "$total"
     wait "$pid" || rc=$?
 
-    printf "\r%*s\r" 60 ""   # efface la ligne d'animation
+    # Efface la ligne d'animation sur toute la largeur du terminal
+    printf "\r%*s\r" "$(tput cols 2>/dev/null || echo 80)" ""
     return "$rc"
 }
 
