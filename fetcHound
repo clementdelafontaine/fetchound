@@ -114,10 +114,14 @@ animate_progress() {
     local pid="$1" watch_path="$2" total="${3:-0}"
     local start=$(( $(date +%s) ))
     local spin='-\|/' i=0 size elapsed filled pct
-    # Largeur de barre adaptée au terminal :
-    # largeur écran - marge pour "[ ] 100% 999.9 GiB / 999.9 GiB [-] 999s"
+    # Largeur de barre adaptée au terminal.
+    # La réserve de 58 couvre le pire cas des informations : " 100% " (6),
+    # "999.9 GiB / 999.9 GiB" (21), "ETA 1:00:00" (11), " [-] 999s" (9),
+    # indentation + crochets + marges. Si la ligne dépassait la largeur du
+    # terminal elle wrappait et le \r ne revenait plus au début, d'où des
+    # frames qui s'accumulaient sur des lignes distinctes.
     local bar_width
-    bar_width=$(( $(tput cols 2>/dev/null || echo 80) - 46 ))
+    bar_width=$(( $(tput cols 2>/dev/null || echo 80) - 58 ))
     (( bar_width < 10 )) && bar_width=10
     local bar_full bar_empty
 
@@ -391,8 +395,11 @@ run_lftp_animated() {
     animate_progress "$pid" "$watch_path" "$total"
     wait "$pid" || rc=$?
 
-    # Efface la ligne d'animation sur toute la largeur du terminal
-    printf "\r%*s\r" "$(tput cols 2>/dev/null || echo 80)" ""
+    # Efface la ligne d'animation (cols - 2 : la ligne ne dépassera jamais
+    # cols - 3, et dépasser le bord du terminal déclencherait un wrap)
+    local clear_width
+    clear_width=$(( $(tput cols 2>/dev/null || echo 80) - 2 ))
+    printf "\r%*s\r" "$clear_width" ""
     return "$rc"
 }
 
