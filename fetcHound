@@ -122,7 +122,10 @@ animate_progress() {
     local bar_full bar_empty
 
     while kill -0 "$pid" 2>/dev/null; do
-        size=$(du -sb "$watch_path" 2>/dev/null | cut -f1)
+        # du -sB1 : octets réellement alloués (exclut les trous creux sparses
+        # créés par pget quand il écrit directement à des offsets élevés,
+        # sinon la barre sautait à ~50% dès le début avec -n 2)
+        size=$(du -sB1 "$watch_path" 2>/dev/null | cut -f1)
         size=${size:-0}
         elapsed=$(( $(date +%s) - start ))
 
