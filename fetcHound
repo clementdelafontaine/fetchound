@@ -266,6 +266,18 @@ process_missing_list() {
 
     info "Catégories demandées : ${MIME_CATEGORIES[*]}"
 
+    # Le filtre anti-numérotation (pensé pour exclure les tutos de formation
+    # du style "01 - Leçon.mp4") exclurait aussi les pistes musicales
+    # ("01 - Titre.flac") : on ne l'applique pas si "musiques" est demandé
+    local NUMERATION='^([0-9]+([._-][0-9]+)?[._-]?[ ]?)'
+    local category
+    for category in "${MIME_CATEGORIES[@]}"; do
+        if [[ "$category" == "musiques" ]]; then
+            NUMERATION=''
+            break
+        fi
+    done
+
     # Construction de la liste des extensions à partir de /etc/mime.types
     local EXTENSIONS="" category mime_ext
     for category in "${MIME_CATEGORIES[@]}"; do
@@ -293,8 +305,8 @@ process_missing_list() {
 
     info "Extensions finales : $EXTENSIONS"
 
-    # Exclut les fichiers dont le nom suit une numérotation indicative de formation
-    local NUMERATION='^([0-9]+([._-][0-9]+)?[._-]?[ ]?)'
+    # Exclut les fichiers dont le nom suit une numérotation indicative de
+    # formation (désactivé pour musiques, voir ci-dessus)
 
     awk -v ext_list="$EXTENSIONS" -v numeration="$NUMERATION" '{
         if ($1 ~ /^-/) {
@@ -310,7 +322,7 @@ process_missing_list() {
 
             # Vérifie si le fichier appartient aux types MIME demandés
             # et ne suit pas une numérotation indicative de formation
-            if (name ~ ("\\." ext_list ")$") && name !~ numeration) {
+            if (name ~ ("\\.(" ext_list ")$") && (numeration == "" || name !~ numeration)) {
                 print name;
             }
         }
