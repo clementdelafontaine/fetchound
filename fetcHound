@@ -7,7 +7,7 @@
 #
 # Options :
 #   -m, --missing <catégories>   Liste les fichiers du serveur absents en local
-#                                 (catégories disponibles : videos, livres)
+#                                 (catégories disponibles : videos, musiques, livres)
 #   -o, --or                      Recherche OU : les termes sont alternatifs
 #   -d, --directory               Recherche limitée aux dossiers uniquement ;
 #                                 leur contenu est téléchargé récursivement via mirror
@@ -184,7 +184,7 @@ Usage : $(basename "$0") [options] "terme_de_recherche"...
 
 Options :
   -m, --missing <catégories>   Liste les fichiers du serveur absents en local
-                               (catégories : videos, livres)
+                               (catégories : videos, musiques, livres)
   -o, --or                     Recherche OU (n'importe quel terme) au lieu de ET (tous les termes)
   -d, --directory              Recherche limitée aux dossiers ; leur contenu est
                                téléchargé récursivement via mirror
@@ -256,10 +256,11 @@ process_file_list() {
     fi
 }
 
-# Mode -m : filtrage par catégories MIME (vidéos, livres)
+# Mode -m : filtrage par catégories MIME (vidéos, musiques, livres)
 process_missing_list() {
     declare -A MIME_MAP=(
         ["videos"]="^video/"
+        ["musiques"]="^audio/"
         ["livres"]="^(application/epub|application/pdf|application/vnd.amazon|application/msword|application/vnd.openxmlformats-officedocument.wordprocessingml)"
     )
 
@@ -286,7 +287,7 @@ process_missing_list() {
     EXTENSIONS="${EXTENSIONS%|}"
 
     if [[ -z "$EXTENSIONS" ]]; then
-        err "Aucune extension récupérée ! Types disponibles : \"videos\", \"livres\""
+        err "Aucune extension récupérée ! Types disponibles : \"videos\", \"musiques\", \"livres\""
         exit 1
     fi
 
